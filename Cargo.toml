@@ -3,10 +3,12 @@ name = "dioxus-cropper"
 version = "0.0.1"
 edition = "2021"
 license = "MIT"
+readme = "README.md"
 description = "A host-agnostic, pure-Rust image cropper component for Dioxus."
 repository = "https://github.com/mze-runner/dioxus-cropper"
 keywords = ["dioxus", "image", "crop", "component", "wasm"]
 categories = ["gui", "multimedia::images", "wasm"]
+exclude = [".github", ".gitignore"]
 
 # No renderer feature is enabled; the consuming application selects one.
 [dependencies.dioxus]
