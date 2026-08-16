@@ -1,0 +1,433 @@
+/* Stylesheet for the dioxus-cropper browser demo. Hand-written, no build
+   step, no external fonts or frameworks. Colour values are concrete —
+   no CSS custom properties, no theme switch. */
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+html {
+    color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
+}
+
+h1,
+p {
+    margin: 0;
+}
+
+body {
+    margin: 0;
+    background-color: #06070b;
+    color: #e4e8f4;
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+*:focus-visible {
+    outline: 2px solid #2e7de0;
+    outline-offset: 2px;
+}
+
+/* ── Shell classes ────────────────────────────────────────── */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 0.5rem 1rem;
+    font-family: system-ui, sans-serif;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.12s ease, opacity 0.12s ease;
+    white-space: nowrap;
+}
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.btn-primary {
+    background-color: #2e7de0;
+    color: #fff;
+}
+.btn-primary:hover:not(:disabled) {
+    background-color: #1f6acc;
+}
+
+.title-text {
+    font-family: system-ui, sans-serif;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #e4e8f4;
+}
+.section-title {
+    font-family: system-ui, sans-serif;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #e4e8f4;
+}
+
+.error-box {
+    background-color: rgba(200, 80, 96, 0.10);
+    border: 1px solid rgba(200, 80, 96, 0.30);
+    border-radius: 6px;
+    padding: 1rem;
+}
+.error-text {
+    color: #c85060;
+    font-size: 0.75rem;
+    margin-top: 0.25rem;
+}
+
+/* ── Demo page ────────────────────────────────────────────── */
+.cr-page {
+    max-width: 1080px;
+    margin: 2rem auto;
+    padding: 0 24px 56px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.cr-header {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.cr-sub {
+    color: #5a6880;
+    font-size: 0.8125rem;
+}
+.cr-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 236px;
+    gap: 20px;
+    align-items: start;
+}
+/* Left grid column: stage, Crop, and Result — all at the stage's width. */
+.cr-stage-col {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+}
+.cr-stage-wrap {
+    background: #0b0d14;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 12px;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+/* Sized by inline style to the active viewport preset (set by the widget)
+   — the stage frame always matches the pixel footprint Cropper itself
+   renders at, in both the empty and loaded state. */
+.cr-stage {
+    position: relative;
+    background: #06070b;
+    border-radius: 9px;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    margin: 0 auto;
+}
+/* Registration corners — the crop-mark motif, and the empty-state frame. */
+.cr-marks {
+    position: absolute;
+    inset: 26px;
+    pointer-events: none;
+}
+.cr-marks div {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border-color: #384055;
+    border-style: solid;
+    border-width: 0;
+}
+.cr-marks div:nth-child(1) { top: 0; left: 0; border-top-width: 2px; border-left-width: 2px; }
+.cr-marks div:nth-child(2) { top: 0; right: 0; border-top-width: 2px; border-right-width: 2px; }
+.cr-marks div:nth-child(3) { bottom: 0; left: 0; border-bottom-width: 2px; border-left-width: 2px; }
+.cr-marks div:nth-child(4) { bottom: 0; right: 0; border-bottom-width: 2px; border-right-width: 2px; }
+.cr-empty {
+    text-align: center;
+    color: #5a6880;
+    display: grid;
+    gap: 10px;
+    justify-items: center;
+}
+.cr-empty svg {
+    opacity: 0.5;
+}
+.cr-empty p {
+    margin: 0;
+    font-size: 0.8125rem;
+    color: #8090a8;
+}
+.cr-hint {
+    font-size: 0.75rem;
+    color: #5a6880;
+}
+.cr-readout {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    align-items: center;
+    font-family: ui-monospace, monospace;
+    font-size: 0.71875rem;
+    color: #5a6880;
+    font-variant-numeric: tabular-nums;
+}
+.cr-readout b {
+    color: #8090a8;
+    font-weight: 500;
+}
+.cr-sep {
+    color: rgba(255, 255, 255, 0.16);
+}
+.cr-rail {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.cr-group {
+    background: #0b0d14;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 9px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+}
+.cr-glabel {
+    font-size: 0.625rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: #5a6880;
+    font-weight: 600;
+}
+.cr-filename {
+    font-size: 0.6875rem;
+    color: #5a6880;
+    overflow-wrap: anywhere;
+}
+.cr-ctrl {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    background: #151a26;
+    color: #8090a8;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    height: 32px;
+    min-width: 32px;
+    padding: 0;
+    cursor: pointer;
+    font-family: system-ui, sans-serif;
+    font-size: 0.75rem;
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.cr-ctrl:hover:not(:disabled) {
+    background: #1c2232;
+    color: #e4e8f4;
+    border-color: rgba(255, 255, 255, 0.16);
+}
+.cr-ctrl:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+/* A `label`'s file-input child is never itself the focused element's own
+   box, so the ring has to be drawn on the label via :focus-within instead
+   of relying on the (visually hidden) input's own :focus-visible. */
+label.cr-ctrl:focus-within {
+    outline: 2px solid #2e7de0;
+    outline-offset: 2px;
+}
+/* Visually-hidden pattern: the element stays in the layout, focusable and
+   in tab order, but occupies no visible space — unlike `display: none`,
+   which removes it from the tab order entirely. */
+.cr-visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+    opacity: 0;
+}
+.cr-ctrl-wide {
+    width: 100%;
+    padding: 0 10px;
+}
+.cr-ctrl-on {
+    background: rgba(46, 125, 224, 0.10);
+    border-color: rgba(46, 125, 224, 0.28);
+    color: #5a9ef0;
+}
+/* Chromeless d-pad centre toggle — no border, no fill; only the icon
+   colour carries resting/hover/pressed state. */
+.cr-ctrl-ghost {
+    background: none;
+    border-color: transparent;
+    color: #5a6880;
+}
+.cr-ctrl-ghost:hover:not(:disabled) {
+    background: none;
+    border-color: transparent;
+    color: #e4e8f4;
+}
+.cr-ctrl-ghost:active:not(:disabled) {
+    color: #5a9ef0;
+}
+.cr-lab {
+    font-size: 0.65625rem;
+    font-variant-numeric: tabular-nums;
+}
+.cr-dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 5px;
+}
+/* Caption under the d-pad, stating the current pan direction in words —
+   guards the centre toggle against reading as "recentre". */
+.cr-cap {
+    font-size: 0.6875rem;
+    color: #5a6880;
+    text-align: center;
+}
+.cr-cap b {
+    color: #8090a8;
+    font-weight: 600;
+}
+.cr-row-3 {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 5px;
+}
+.cr-row-4 {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 5px;
+}
+.cr-zoomrow {
+    display: grid;
+    grid-template-columns: 32px 1fr 32px;
+    gap: 5px;
+    align-items: center;
+}
+.cr-zoomval {
+    text-align: center;
+    font-family: ui-monospace, monospace;
+    font-size: 0.75rem;
+    color: #8090a8;
+    font-variant-numeric: tabular-nums;
+}
+.cr-crop-btn {
+    width: 100%;
+    height: 38px;
+    gap: 8px;
+}
+.cr-crop-blocked {
+    display: block;
+    font-size: 0.71875rem;
+    color: #c8963c;
+    margin-top: 4px;
+}
+/* Visible effect of `Cropper`'s `classes` prop — see `Stage`. */
+.cr-cropper-viewport {
+    border: 1px solid rgba(46, 125, 224, 0.35);
+}
+.cr-tuning-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+/* Interactive tuning rows — the row itself is the value's control
+   (cycle/toggle on activation), styled as a plain readout row. */
+.cr-tuning-row-btn {
+    width: 100%;
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.cr-tuning-row-btn:hover .cr-tune-val {
+    color: #e4e8f4;
+}
+.cr-tuning-row-btn:focus-visible {
+    outline: 2px solid #2e7de0;
+    outline-offset: 2px;
+    border-radius: 4px;
+}
+.cr-tune-val {
+    font-family: ui-monospace, monospace;
+    font-size: 0.71875rem;
+    color: #8090a8;
+    font-variant-numeric: tabular-nums;
+}
+.cr-tune-val-on {
+    color: #5a9ef0;
+}
+.cr-range {
+    width: 100%;
+    margin: 0;
+    accent-color: #2e7de0;
+}
+.cr-result {
+    background: #0b0d14;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 12px;
+    padding: 16px;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+/* border-radius and object-fit are set inline per crop (see ResultStrip) —
+   contain, not cover, so the whole output is visible rather than centre-
+   cropped into this fixed box; border-radius follows the stencil shape so a
+   circle crop reads as a circle. */
+.cr-thumb {
+    width: 96px;
+    height: 96px;
+    flex: none;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    background: #151a26;
+}
+.cr-result-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.cr-result-dims {
+    font-family: ui-monospace, monospace;
+    font-size: 0.75rem;
+    color: #5a6880;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── Responsive ───────────────────────────────────────────── */
+/* Rail drops under the stage below this width. */
+@media (max-width: 800px) {
+    .cr-grid {
+        grid-template-columns: 1fr;
+    }
+}

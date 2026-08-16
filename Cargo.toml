@@ -1,14 +1,19 @@
 [package]
 name = "dioxus-cropper"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
-license = "MIT"
+rust-version = "1.88.0"
+license = "MIT OR Apache-2.0"
 readme = "README.md"
 description = "A host-agnostic, pure-Rust image cropper component for Dioxus."
 repository = "https://github.com/mze-runner/dioxus-cropper"
 keywords = ["dioxus", "image", "crop", "component", "wasm"]
 categories = ["gui", "multimedia::images", "wasm"]
-exclude = [".github", ".gitignore"]
+exclude = [".github", ".gitignore", "examples"]
+
+[workspace]
+members = [".", "examples/demo"]
+default-members = ["."]
 
 # No renderer feature is enabled; the consuming application selects one.
 [dependencies.dioxus]
@@ -16,8 +21,7 @@ version = "0.7"
 default-features = false
 features = ["macro", "html", "signals", "hooks"]
 
-# `rayon` is off: it requires native threads, which `wasm32-unknown-unknown`
-# does not provide. Per-format features are named explicitly instead.
+# `rayon` is off. Per-format features are named explicitly.
 [dependencies.image]
 version = "0.25"
 default-features = false

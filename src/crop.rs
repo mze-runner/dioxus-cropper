@@ -64,7 +64,8 @@
 //! yields `240 / 0.25 = 960` source pixels per side.
 
 use crate::geometry::{contain_scale, Size, Stencil, ViewTransform};
-use image::{ImageBuffer, ImageError, Rgba, RgbaImage};
+use image::{ImageBuffer, Rgba, RgbaImage};
+use std::sync::Arc;
 
 /// The cropped image: PNG-encoded bytes plus the pixel dimensions the
 /// caller needs to display or sanity-check the result. Fields are the
@@ -81,6 +82,7 @@ pub struct CroppedImage {
 }
 
 /// Everything that can go wrong producing a crop.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum CropError {
     /// `view`'s `offset.x`, `offset.y`, `zoom` or `rotation` is `NaN` or
@@ -97,10 +99,24 @@ pub enum CropError {
     /// empty or non-finite viewport would make `fit_scale` zero, non-finite,
     /// or produce a divide-by-zero downstream.
     EmptyViewport,
+    /// `natural`'s width or height is not a positive, finite number — there
+    /// is no real image extent to derive a scale or an output size from.
+    EmptyNatural,
+    /// The computed output would exceed [`MAX_OUTPUT_PIXELS`] pixels. Carries
+    /// the computed `(width, height)` so the caller can report them. Reached
+    /// at low `zoom` against a small viewport — a small
+    /// `stencil / (fit_scale * zoom)` ratio blows the output up rather than
+    /// down.
+    OutputTooLarge {
+        /// The computed output width, in pixels, that exceeded the limit.
+        width: u32,
+        /// The computed output height, in pixels, that exceeded the limit.
+        height: u32,
+    },
     /// `source_bytes` could not be decoded as an image.
-    Decode(ImageError),
+    Decode(Box<dyn std::error::Error + Send + Sync>),
     /// The sampled result could not be PNG-encoded.
-    Encode(ImageError),
+    Encode(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl std::fmt::Display for CropError {
@@ -114,6 +130,13 @@ impl std::fmt::Display for CropError {
             Self::EmptyViewport => {
                 write!(f, "viewport has zero, negative, or non-finite width/height")
             }
+            Self::EmptyNatural => {
+                write!(f, "natural has zero, negative, or non-finite width/height")
+            }
+            Self::OutputTooLarge { width, height } => write!(
+                f,
+                "computed output {width}x{height} exceeds the {MAX_OUTPUT_PIXELS}-pixel limit"
+            ),
             Self::Decode(e) => write!(f, "could not decode source image: {e}"),
             Self::Encode(e) => write!(f, "could not encode cropped image: {e}"),
         }
@@ -123,11 +146,13 @@ impl std::fmt::Display for CropError {
 impl std::error::Error for CropError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Decode(e) | Self::Encode(e) => Some(e),
+            Self::Decode(e) | Self::Encode(e) => Some(e.as_ref()),
             Self::NonFiniteTransform
             | Self::InvalidZoom
             | Self::EmptyStencil
-            | Self::EmptyViewport => None,
+            | Self::EmptyViewport
+            | Self::EmptyNatural
+            | Self::OutputTooLarge { .. } => None,
         }
     }
 }
@@ -181,8 +206,11 @@ pub fn crop_to_png(
 /// lets the user press "Crop" more than once against the same picked file
 /// must decode once with [`Self::decode`] and reuse it via
 /// [`crop_decoded_to_png`], not call [`crop_to_png`] per press.
+///
+/// Cloning is a shared-handle copy — a refcount bump over an `Arc`, not a
+/// copy of the underlying pixel buffer.
 #[derive(Debug, Clone)]
-pub struct DecodedSource(RgbaImage);
+pub struct DecodedSource(Arc<RgbaImage>);
 
 impl DecodedSource {
     /// Decodes `source_bytes` once. Cache the result across repeated crops
@@ -194,8 +222,8 @@ impl DecodedSource {
     /// an image.
     pub fn decode(source_bytes: &[u8]) -> Result<Self, CropError> {
         image::load_from_memory(source_bytes)
-            .map(|img| Self(img.to_rgba8()))
-            .map_err(CropError::Decode)
+            .map(|img| Self(Arc::new(img.to_rgba8())))
+            .map_err(|e| CropError::Decode(Box::new(e)))
     }
 
     /// The decoded image's real pixel dimensions — exactly what a caller
@@ -205,6 +233,81 @@ impl DecodedSource {
     pub fn natural_size(&self) -> Size {
         Size::new(self.0.width() as f32, self.0.height() as f32)
     }
+}
+
+/// The largest output area, in pixels (width × height), [`output_size`] will
+/// return. 64 megapixels — generous for any real crop, and small enough that
+/// the resulting RGBA buffer (256 MB) stays well inside a 32-bit `usize`
+/// address space, avoiding the overflow/allocation failure this limit
+/// guards against. Pre-check against this constant to avoid provoking
+/// [`CropError::OutputTooLarge`].
+pub const MAX_OUTPUT_PIXELS: u64 = 64 * 1024 * 1024;
+
+/// The pixel dimensions [`crop_decoded_to_png`] (and [`crop_to_png`]) would
+/// produce for the given `natural`, `viewport`, `stencil` and `zoom`,
+/// without decoding or sampling any pixels. `crop_decoded_to_png` calls this
+/// function for its own output dimensions, so the two can never drift.
+///
+/// # Errors
+///
+/// Returns [`CropError::NonFiniteTransform`] if `zoom` is `NaN` or infinite,
+/// [`CropError::InvalidZoom`] if `zoom` is not positive, [`CropError::EmptyStencil`]
+/// if `stencil`'s width or height is not positive and finite,
+/// [`CropError::EmptyViewport`] if `viewport`'s width or height is not
+/// positive and finite, [`CropError::EmptyNatural`] if `natural`'s width
+/// or height is not positive and finite, and [`CropError::OutputTooLarge`]
+/// if the computed output area would exceed [`MAX_OUTPUT_PIXELS`].
+pub fn output_size(
+    natural: Size,
+    viewport: Size,
+    stencil: Stencil,
+    zoom: f32,
+) -> Result<(u32, u32), CropError> {
+    if !zoom.is_finite() {
+        return Err(CropError::NonFiniteTransform);
+    }
+    if zoom <= 0.0 {
+        return Err(CropError::InvalidZoom);
+    }
+    let stencil_w_ok = stencil.width().is_finite() && stencil.width() > 0.0;
+    let stencil_h_ok = stencil.height().is_finite() && stencil.height() > 0.0;
+    if !stencil_w_ok || !stencil_h_ok {
+        return Err(CropError::EmptyStencil);
+    }
+    let viewport_w_ok = viewport.width.is_finite() && viewport.width > 0.0;
+    let viewport_h_ok = viewport.height.is_finite() && viewport.height > 0.0;
+    if !viewport_w_ok || !viewport_h_ok {
+        return Err(CropError::EmptyViewport);
+    }
+    let natural_w_ok = natural.width.is_finite() && natural.width > 0.0;
+    let natural_h_ok = natural.height.is_finite() && natural.height > 0.0;
+    if !natural_w_ok || !natural_h_ok {
+        return Err(CropError::EmptyNatural);
+    }
+
+    // The same fit scale `Cropper` renders the image at (see module doc):
+    // the combined source-to-screen scale is `fit_scale * zoom`, not `zoom`
+    // alone, whenever the source's natural size differs from the viewport.
+    let fit_scale = contain_scale(natural, viewport);
+    let scale = fit_scale * zoom;
+
+    // `.max(1)` guards only against the output resolving to zero pixels
+    // through rounding (e.g. a tiny stencil at very high zoom) — `stencil`
+    // was already confirmed non-empty above, so this never masks the
+    // `EmptyStencil` case, only float rounding at its edge.
+    let out_w = ((stencil.width() / scale).round() as i64).clamp(1, u32::MAX as i64) as u32;
+    let out_h = ((stencil.height() / scale).round() as i64).clamp(1, u32::MAX as i64) as u32;
+
+    // Computed as `u64` so the area itself cannot overflow while checking it
+    // — `u32::MAX * u32::MAX` overflows `u32` but not `u64`.
+    if u64::from(out_w) * u64::from(out_h) > MAX_OUTPUT_PIXELS {
+        return Err(CropError::OutputTooLarge {
+            width: out_w,
+            height: out_h,
+        });
+    }
+
+    Ok((out_w, out_h))
 }
 
 /// Same as [`crop_to_png`], but against an already-decoded source — the
@@ -234,35 +337,14 @@ pub fn crop_decoded_to_png(
     {
         return Err(CropError::NonFiniteTransform);
     }
-    if zoom <= 0.0 {
-        return Err(CropError::InvalidZoom);
-    }
-    let stencil_w_ok = stencil.width().is_finite() && stencil.width() > 0.0;
-    let stencil_h_ok = stencil.height().is_finite() && stencil.height() > 0.0;
-    if !stencil_w_ok || !stencil_h_ok {
-        return Err(CropError::EmptyStencil);
-    }
-    let viewport_w_ok = viewport.width.is_finite() && viewport.width > 0.0;
-    let viewport_h_ok = viewport.height.is_finite() && viewport.height > 0.0;
-    if !viewport_w_ok || !viewport_h_ok {
-        return Err(CropError::EmptyViewport);
-    }
 
-    let source = &decoded.0;
+    let (out_w, out_h) = output_size(decoded.natural_size(), viewport, stencil, zoom)?;
+
+    let source = decoded.0.as_ref();
     let (src_w, src_h) = (source.width() as f32, source.height() as f32);
 
-    // The same fit scale `Cropper` renders the image at (see module doc):
-    // the combined source-to-screen scale is `fit_scale * zoom`, not `zoom`
-    // alone, whenever the source's natural size differs from the viewport.
     let fit_scale = contain_scale(decoded.natural_size(), viewport);
     let scale = fit_scale * zoom;
-
-    // `.max(1)` guards only against the output resolving to zero pixels
-    // through rounding (e.g. a tiny stencil at very high zoom) — `stencil`
-    // was already confirmed non-empty above, so this never masks the
-    // `EmptyStencil` case, only float rounding at its edge.
-    let out_w = ((stencil.width() / scale).round() as i64).clamp(1, u32::MAX as i64) as u32;
-    let out_h = ((stencil.height() / scale).round() as i64).clamp(1, u32::MAX as i64) as u32;
 
     let rotation_rad = rotation.to_radians();
     // Sampling needs the INVERSE rotation (see module doc): `Rotate(-rotation)`.
@@ -290,7 +372,7 @@ pub fn crop_decoded_to_png(
             &mut std::io::Cursor::new(&mut png_bytes),
             image::ImageFormat::Png,
         )
-        .map_err(CropError::Encode)?;
+        .map_err(|e| CropError::Encode(Box::new(e)))?;
 
     Ok(CroppedImage {
         width: out_w,

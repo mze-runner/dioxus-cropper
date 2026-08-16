@@ -1,6 +1,8 @@
 # dioxus-cropper
 
 [![CI](https://github.com/mze-runner/dioxus-cropper/actions/workflows/ci.yml/badge.svg)](https://github.com/mze-runner/dioxus-cropper/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/dioxus-cropper.svg)](https://crates.io/crates/dioxus-cropper)
+[![docs.rs](https://img.shields.io/docsrs/dioxus-cropper)](https://docs.rs/dioxus-cropper)
 
 A headless image cropper component for Dioxus.
 
@@ -10,12 +12,12 @@ A headless image cropper component for Dioxus.
 
 ## Installation
 
-Not published to crates.io. Add it as a git dependency, and select a Dioxus renderer feature (`web`, `desktop`, etc.) in the consuming crate:
-
 ```toml
 [dependencies]
-dioxus-cropper = { git = "https://github.com/mze-runner/dioxus-cropper" }
+dioxus-cropper = "0.0.2"
 ```
+
+Select a Dioxus renderer feature (`web`, `desktop`, etc.) in the consuming crate.
 
 ## Usage
 
@@ -72,11 +74,19 @@ let cropped = crop_to_png(source_bytes, view, stencil, viewport)?;
 
 For a picked file the user may crop more than once, decode once with `DecodedSource::decode` and call `crop_decoded_to_png` per press instead — `crop_to_png` decodes fresh on every call, and decode dominates the pipeline's cost.
 
+To preview the crop's output dimensions without decoding or sampling any pixels, call `output_size` — it computes exactly what `crop_decoded_to_png` returns for the same `natural`, `viewport`, `stencil` and `zoom`:
+
+```rust
+use dioxus_cropper::output_size;
+
+let (width, height) = output_size(natural_size, viewport, stencil, view.zoom)?;
+```
+
 ## Configurable
 
 | Prop | Type | Purpose |
 |---|---|---|
-| `src` | `String` | Image source — URL or data URI. |
+| `src` | `Arc<str>` (`#[props(into)]` — accepts `&str`, `String`, or `Arc<str>`) | Image source — URL or data URI. |
 | `natural_size` | `Size` | The decoded image's real pixel dimensions. |
 | `view` | `ViewTransform` | Caller-owned offset, zoom, rotation. |
 | `stencil` | `Stencil` | The crop window — `Stencil::rectangle`, `Stencil::square`, or `Stencil::circle`. |
@@ -88,6 +98,12 @@ For a picked file the user may crop more than once, decode once with `DecodedSou
 | `on_pan` | `EventHandler<Point>` | Raw pan delta, adjusted for `pan_direction`. |
 | `on_zoom` | `EventHandler<f32>` | Raw wheel delta, sign-flipped so positive means zoom in. |
 
+## Production hosts: decode and crop block the calling thread
+
+`DecodedSource::decode` and `crop_decoded_to_png` are synchronous CPU work — resampling and PNG encoding included — and both block whichever thread calls them for as long as they run. On the web target that thread is the browser's main thread, so a call in progress freezes the page: no repaint, no input handling, until it returns.
+
+A production web host should run both calls in a Web Worker and message the result back to the main thread, keeping the page responsive while a large image decodes or crops. `output_size` lets a host predict the crop's output pixel dimensions from `natural`, `viewport`, `stencil` and `zoom` alone, without decoding or sampling any pixels, so it can be checked up front. `MAX_OUTPUT_PIXELS` is the ceiling `output_size` and `crop_decoded_to_png` enforce on that predicted output.
+
 ## Licence
 
-MIT
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
