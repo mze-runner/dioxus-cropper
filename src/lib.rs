@@ -66,13 +66,17 @@
 
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
+use std::sync::Arc;
 
 pub mod crop;
 pub mod geometry;
-pub use crop::{crop_decoded_to_png, crop_to_png, CropError, CroppedImage, DecodedSource};
+pub use crop::{
+    crop_decoded_to_png, crop_to_png, output_size, CropError, CroppedImage, DecodedSource,
+    MAX_OUTPUT_PIXELS,
+};
 pub use geometry::{
-    clamp_offset, contain_scale, min_zoom_to_cover, Point, Size, Stencil, StencilShape,
-    ViewTransform,
+    clamp_offset, contain_scale, min_zoom_to_cover, normalize_rotation, rotated_bounding_box,
+    Point, Size, Stencil, StencilShape, ViewTransform,
 };
 
 /// The mouse cursor `Cropper` shows over its viewport while idle and while
@@ -198,7 +202,7 @@ enum DragState {
 /// `viewport` parameter for any `view` rendered against it.
 #[component]
 pub fn Cropper(
-    src: String,
+    #[props(into)] src: Arc<str>,
     natural_size: Size,
     view: ViewTransform,
     stencil: Stencil,

@@ -286,9 +286,8 @@ fn circle_stencil_does_not_mask_the_output_corners() {
 
     let cropped = crop_to_png(&source, view, stencil, viewport).expect("crop succeeds");
     let out = decode(&cropped.png_bytes);
-    // A true circular mask would make the corners transparent; crop_to_png
-    // deliberately does not apply the stencil's shape, so the corner must
-    // still be fully opaque.
+    // crop_to_png does not apply the stencil's shape: a circle stencil
+    // yields its square bounding box, corners fully opaque.
     assert_eq!(out.get_pixel(0, 0).0[3], 255);
     assert_eq!(out.get_pixel(39, 39).0[3], 255);
 }

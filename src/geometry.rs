@@ -1,5 +1,5 @@
 //! Plain geometry types shared across `dioxus-cropper`. No `dioxus`
-//! dependency here — kept host-agnostic on purpose.
+//! dependency here — host-agnostic.
 
 /// A 2D offset, in pixels. In [`Cropper`](crate::Cropper) this is the
 /// image's displacement from the centre of the viewport — positive `x`
@@ -102,6 +102,10 @@ pub fn rotated_bounding_box(size: Size, rotation_deg: f32) -> Size {
 ///
 /// Uses [`rotated_bounding_box`] and therefore inherits its bounding-box
 /// caveat — see that function's doc.
+///
+/// `natural`'s width and height must both be positive and finite. This
+/// function returns `f32`, not `Result`, so a degenerate `natural` is not
+/// reported — it propagates as `NaN` or infinity in the returned zoom.
 pub fn min_zoom_to_cover(
     natural: Size,
     fit_scale: f32,
@@ -125,6 +129,10 @@ pub fn min_zoom_to_cover(
 ///
 /// Uses [`rotated_bounding_box`] and therefore inherits its bounding-box
 /// caveat — see that function's doc.
+///
+/// `natural`'s width and height must both be positive and finite. This
+/// function returns `Point`, not `Result`, so a degenerate `natural` is not
+/// reported — it propagates as `NaN` in the returned offset.
 pub fn clamp_offset(
     offset: Point,
     natural: Size,

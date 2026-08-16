@@ -1,0 +1,19 @@
+[package]
+name = "dioxus-cropper-demo"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+dioxus = { version = "0.7", default-features = false, features = ["macro", "html", "signals", "hooks", "launch", "document", "asset", "devtools", "web"] }
+dioxus-cropper = { path = "../.." }
+base64 = "0.23"
+gloo-timers = { version = "0.3", features = ["futures"] }
+# `requestAnimationFrame`, for the paint-before-block yield in `paint.rs`.
+web-sys = { version = "0.3", features = ["Window"] }
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

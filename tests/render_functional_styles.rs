@@ -1,8 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! Locks in the *functional* inline styles `Cropper` sets on its rendered
-//! elements — styles the component breaks without. Every pure-function test
-//! in this crate would still pass if a refactor dropped any of these; only a
-//! render-level assertion over the markup catches that.
+//! Asserts the functional inline styles `Cropper` sets on its rendered
+//! elements — the styles the component requires to behave correctly.
 //!
 //! Builds a `VirtualDom` directly (no router/context needed — `Cropper`
 //! takes no context), `rebuild_in_place`, then asserts over

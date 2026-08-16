@@ -41,3 +41,48 @@ jobs:
 
       - name: Build for wasm32
         run: cargo build --target wasm32-unknown-unknown
+
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install clippy
+        run: rustup component add clippy
+
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build demo for wasm32
+        run: cargo build -p dioxus-cropper-demo --target wasm32-unknown-unknown
+
+      - name: Clippy demo for wasm32
+        run: cargo clippy -p dioxus-cropper-demo --target wasm32-unknown-unknown -- -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install MSRV toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check against MSRV
+        run: cargo +1.88.0 check --lib
+
+  semver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check semver
+        continue-on-error: true
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          feature-group: default-features

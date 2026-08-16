@@ -74,10 +74,10 @@ fn clamp_offset_zeroes_the_axis_exactly_covered_and_leaves_slack_on_the_other() 
 fn clamp_offset_collapses_to_zero_when_the_image_is_smaller_than_the_stencil() {
     let natural = Size::new(50.0, 50.0);
     let stencil = Stencil::square(100.0);
-    // zoom = 1.0, deliberately below min_zoom_to_cover for this input: the
-    // displayed image (50x50) is smaller than the stencil (100x100) on both
-    // axes, so no offset can keep the stencil covered. The range must
-    // collapse to a single point (0,0), never invert to a negative bound.
+    // zoom = 1.0 is below min_zoom_to_cover for this input: the displayed
+    // image (50x50) is smaller than the stencil (100x100) on both axes, so
+    // no offset keeps the stencil covered. The range collapses to a single
+    // point (0,0) and never inverts to a negative bound.
     let clamped = clamp_offset(Point::new(30.0, -30.0), natural, 1.0, 1.0, 0.0, stencil);
     assert_eq!(clamped, Point::new(0.0, 0.0));
 }
