@@ -22,9 +22,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   inverse transform incrementally instead of re-deriving it per pixel.
   Large-source crops are substantially faster — measurements in
   `docs/perf-baseline.md`.
-- PNG output is encoded for speed (fast compression, no pre-filtering):
-  identical pixels, larger byte size. A caller archiving crops can
-  re-encode with a heavier compressor without loss.
+- PNG encoding pins its settings explicitly (fast compression with
+  adaptive filtering — the encoder's previous effective defaults) and
+  pre-sizes the output buffer. Output bytes are unchanged in practice; a
+  caller archiving crops can still re-encode with a heavier compressor
+  without loss.
 - `DecodedSource::decode` enforces decode limits: a source over 16384
   pixels per side, or whose decode would exceed the allocation cap, returns
   `CropError::Decode` instead of exhausting memory.

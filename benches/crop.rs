@@ -9,8 +9,8 @@
 //!   sizes and rotations. Rotation matters: `0.0` and `90.0` keep the
 //!   inverse transform axis-aligned, while an oblique angle like `37.0`
 //!   makes every sample a genuinely rotated lookup.
-//! - `encode_png` — the same fast-compression/no-filter `PngEncoder` call
-//!   `crop_decoded_to_png` makes, on its own, so encode cost can be
+//! - `encode_png` — the same fast-compression/adaptive-filter `PngEncoder`
+//!   call `crop_decoded_to_png` makes, on its own, so encode cost can be
 //!   subtracted from the `crop` numbers to expose the sampling loop.
 //!
 //! All fixtures are synthetic and deterministic — no binary fixtures in the
@@ -59,16 +59,11 @@ fn synthetic_rgba(width: u32, height: u32) -> RgbaImage {
     RgbaImage::from_raw(width, height, data).expect("buffer sized to width * height * 4")
 }
 
-/// PNG-encodes `img` exactly the way `crop_decoded_to_png` does — same
-/// encoder, same fast-compression/no-filter settings — so the `encode_png`
-/// group measures the real call and the `decode` fixtures round-trip
-/// through the same bytes the library would produce. Kept in lockstep with
-/// the library's encode configuration: if `crop.rs` changes its encoder
-/// settings, this helper must follow, or `encode_png` measures a path the
-/// library no longer takes.
+/// PNG-encodes `img` with the same encoder and settings as
+/// `crop_decoded_to_png`; must stay in lockstep with `crop.rs`.
 fn encode_to_png(img: &RgbaImage) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(img.width() as usize * img.height() as usize);
-    PngEncoder::new_with_quality(&mut bytes, CompressionType::Fast, FilterType::NoFilter)
+    PngEncoder::new_with_quality(&mut bytes, CompressionType::Fast, FilterType::Adaptive)
         .write_image(
             img.as_raw(),
             img.width(),

@@ -384,13 +384,10 @@ pub fn crop_decoded_to_png(
 
     let pixels = rasterize(source, out_w, out_h, scale, offset, rotation);
 
-    // Fast DEFLATE with no PNG pre-filtering: the output is a preview/
-    // transfer artifact, so encode speed is worth more than compression
-    // density — the decoded pixels are identical either way, only the byte
-    // count changes. The capacity assumes RGBA deflates at least 4:1 — a
-    // heuristic to avoid realloc-copy churn while encoding, not a bound.
+    // Fast DEFLATE with adaptive per-row filtering. The capacity assumes
+    // RGBA deflates at least 4:1 — a heuristic, not a bound.
     let mut png_bytes = Vec::with_capacity(out_w as usize * out_h as usize);
-    PngEncoder::new_with_quality(&mut png_bytes, CompressionType::Fast, FilterType::NoFilter)
+    PngEncoder::new_with_quality(&mut png_bytes, CompressionType::Fast, FilterType::Adaptive)
         .write_image(&pixels, out_w, out_h, ExtendedColorType::Rgba8)
         .map_err(|e| CropError::Encode(Box::new(e)))?;
 
