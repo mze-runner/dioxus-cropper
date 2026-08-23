@@ -63,8 +63,9 @@
 //! `fit_scale = 480 / 1920 = 0.25`, so `scale = 0.25`. A 240px stencil then
 //! yields `240 / 0.25 = 960` source pixels per side.
 
-use crate::geometry::{contain_scale, Size, Stencil, ViewTransform};
-use image::{ImageBuffer, Rgba, RgbaImage};
+use crate::geometry::{contain_scale, normalize_rotation, Point, Size, Stencil, ViewTransform};
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+use image::{ExtendedColorType, ImageEncoder, RgbaImage};
 use std::sync::Arc;
 
 /// The cropped image: PNG-encoded bytes plus the pixel dimensions the
@@ -77,7 +78,10 @@ pub struct CroppedImage {
     pub width: u32,
     /// The cropped image's height, in pixels.
     pub height: u32,
-    /// The cropped image, PNG-encoded.
+    /// The cropped image, PNG-encoded. Encoded for speed rather than for
+    /// minimum size — the pixels are identical either way, so a caller
+    /// archiving crops long-term can re-encode with a heavier compressor
+    /// without loss.
     pub png_bytes: Vec<u8>,
 }
 
@@ -188,7 +192,8 @@ impl std::error::Error for CropError {
 /// positive and finite, [`CropError::EmptyStencil`] if `stencil`'s width or
 /// height is not positive and finite, [`CropError::EmptyViewport`] if
 /// `viewport`'s width or height is not positive and finite, and
-/// [`CropError::Decode`] if `source_bytes` cannot be decoded as an image.
+/// [`CropError::Decode`] if `source_bytes` cannot be decoded as an image or
+/// exceeds the decode limits documented on [`DecodedSource::decode`].
 /// [`CropError::Encode`] is returned if the sampled result cannot be
 /// PNG-encoded.
 pub fn crop_to_png(
@@ -212,6 +217,12 @@ pub fn crop_to_png(
 #[derive(Debug, Clone)]
 pub struct DecodedSource(Arc<RgbaImage>);
 
+/// The largest source width or height, in pixels, [`DecodedSource::decode`]
+/// accepts. 16384 per side covers an 8K frame with generous headroom, and
+/// refuses decoder bombs whose claimed dimensions are hostile even when
+/// their predicted allocation squeaks under the byte cap.
+const MAX_SOURCE_DIMENSION: u32 = 16_384;
+
 impl DecodedSource {
     /// Decodes `source_bytes` once. Cache the result across repeated crops
     /// of the same picked file.
@@ -219,10 +230,30 @@ impl DecodedSource {
     /// # Errors
     ///
     /// Returns [`CropError::Decode`] if `source_bytes` cannot be decoded as
-    /// an image.
+    /// an image. Decoding is limited: a source whose header claims a width
+    /// or height above 16384 pixels, or whose decoding would allocate more
+    /// than the `image` crate's default allocation limit, is refused with
+    /// the same [`CropError::Decode`] before any pixel work — the dimension
+    /// cap covers an 8K source with generous headroom while rejecting
+    /// decoder bombs whose claimed dimensions are hostile even when their
+    /// predicted allocation stays under the byte cap.
     pub fn decode(source_bytes: &[u8]) -> Result<Self, CropError> {
-        image::load_from_memory(source_bytes)
-            .map(|img| Self(Arc::new(img.to_rgba8())))
+        // Keep the default allocation limit; the dimension caps are strict
+        // and checked against the header before any decoding happens.
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
+        limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
+
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(source_bytes))
+            .with_guessed_format()
+            .map_err(|e| CropError::Decode(Box::new(e)))?;
+        reader.limits(limits);
+
+        // `into_rgba8` reuses the decoded buffer when the source is already
+        // RGBA8, where `to_rgba8` would copy it unconditionally.
+        reader
+            .decode()
+            .map(|img| Self(Arc::new(img.into_rgba8())))
             .map_err(|e| CropError::Decode(Box::new(e)))
     }
 
@@ -341,37 +372,26 @@ pub fn crop_decoded_to_png(
     let (out_w, out_h) = output_size(decoded.natural_size(), viewport, stencil, zoom)?;
 
     let source = decoded.0.as_ref();
-    let (src_w, src_h) = (source.width() as f32, source.height() as f32);
 
+    // Sampling arithmetic runs in f64: an f32 mantissa (24 bits) spends 13
+    // of them on the integer part of an 8K coordinate, leaving well under a
+    // thousandth of a pixel — too close to `.round()`'s decision boundary
+    // once a rotation and a division have each contributed their own
+    // half-ulp. The f32 inputs widen into f64 exactly, so nothing is lost
+    // on the way in.
     let fit_scale = contain_scale(decoded.natural_size(), viewport);
-    let scale = fit_scale * zoom;
+    let scale = f64::from(fit_scale) * f64::from(zoom);
 
-    let rotation_rad = rotation.to_radians();
-    // Sampling needs the INVERSE rotation (see module doc): `Rotate(-rotation)`.
-    let (sin_inv, cos_inv) = (-rotation_rad).sin_cos();
+    let pixels = rasterize(source, out_w, out_h, scale, offset, rotation);
 
-    let output: RgbaImage = ImageBuffer::from_fn(out_w, out_h, |ox, oy| {
-        let screen_x = (ox as f32 - out_w as f32 / 2.0) * scale;
-        let screen_y = (oy as f32 - out_h as f32 / 2.0) * scale;
-
-        let dx = screen_x - offset.x;
-        let dy = screen_y - offset.y;
-
-        let cx = (dx * cos_inv - dy * sin_inv) / scale;
-        let cy = (dx * sin_inv + dy * cos_inv) / scale;
-
-        let sx = cx + src_w / 2.0;
-        let sy = cy + src_h / 2.0;
-
-        sample_nearest(source, sx, sy)
-    });
-
-    let mut png_bytes = Vec::new();
-    output
-        .write_to(
-            &mut std::io::Cursor::new(&mut png_bytes),
-            image::ImageFormat::Png,
-        )
+    // Fast DEFLATE with no PNG pre-filtering: the output is a preview/
+    // transfer artifact, so encode speed is worth more than compression
+    // density — the decoded pixels are identical either way, only the byte
+    // count changes. The capacity assumes RGBA deflates at least 4:1 — a
+    // heuristic to avoid realloc-copy churn while encoding, not a bound.
+    let mut png_bytes = Vec::with_capacity(out_w as usize * out_h as usize);
+    PngEncoder::new_with_quality(&mut png_bytes, CompressionType::Fast, FilterType::NoFilter)
+        .write_image(&pixels, out_w, out_h, ExtendedColorType::Rgba8)
         .map_err(|e| CropError::Encode(Box::new(e)))?;
 
     Ok(CroppedImage {
@@ -381,20 +401,395 @@ pub fn crop_decoded_to_png(
     })
 }
 
-/// Nearest-neighbour lookup at a continuous source coordinate. Rounds to
-/// the nearest pixel index and returns fully transparent for anything that
-/// rounds outside the source's bounds — the caller's stencil position is
-/// unclamped, so out-of-source samples are an expected, non-error case.
-fn sample_nearest(source: &RgbaImage, sx: f32, sy: f32) -> Rgba<u8> {
-    let ix = sx.round();
-    let iy = sy.round();
-    if ix < 0.0 || iy < 0.0 || !ix.is_finite() || !iy.is_finite() {
-        return Rgba([0, 0, 0, 0]);
-    }
-    let (ix, iy) = (ix as u32, iy as u32);
-    if ix >= source.width() || iy >= source.height() {
-        Rgba([0, 0, 0, 0])
+/// Samples every pixel of the `out_w`×`out_h` crop from `source` and
+/// returns the raw RGBA bytes, row-major. The buffer starts zeroed — zero
+/// RGBA is the fully transparent fill every out-of-source sample is
+/// documented to produce — so both paths below only ever write in-source
+/// pixels and leave the rest untouched.
+///
+/// Dispatches between two equivalent evaluations of the module doc's
+/// inverse map: [`raster_translation`] when [`translation_offsets`] proves
+/// the view is a pure integer translation, and [`raster_general`]
+/// otherwise. Byte-for-byte equivalence of the two is exercised across a
+/// parameter grid by this module's tests.
+fn rasterize(
+    source: &RgbaImage,
+    out_w: u32,
+    out_h: u32,
+    scale: f64,
+    offset: Point,
+    rotation: f32,
+) -> Vec<u8> {
+    let mut pixels = vec![0u8; out_w as usize * out_h as usize * 4];
+    if let Some((tx, ty)) = translation_offsets(source, out_w, out_h, scale, offset, rotation) {
+        raster_translation(source, out_w, out_h, tx, ty, &mut pixels);
     } else {
-        *source.get_pixel(ix, iy)
+        raster_general(source, out_w, out_h, scale, offset, rotation, &mut pixels);
+    }
+    pixels
+}
+
+/// Decides whether the crop is a pure integer translation of the source
+/// and, if so, returns the per-axis translation `(tx, ty)` such that output
+/// pixel `(ox, oy)` samples source pixel `(ox + tx, oy + ty)`.
+///
+/// At zero rotation the inverse map (module doc) collapses per axis to
+/// `sx = ox + Cx` with `Cx = src_w / 2 - out_w / 2 - offset.x / scale`
+/// (`Cy` analogously with heights and `offset.y`): the rotation terms drop
+/// out and the `* scale` / `/ scale` pair cancels exactly, leaving a
+/// constant. Rounding then commutes with the integer pixel index —
+/// `round(ox + Cx) = ox + round(Cx)` — so one rounded constant serves every
+/// pixel and rows can be block-copied.
+///
+/// That identity has one exception: a `Cx` whose fractional part is exactly
+/// `±0.5`. Rust rounds halves away from zero, so e.g. `round(3 + (-2.5)) =
+/// 1` while `3 + round(-2.5) = 0` — a whole-column shift. Half-integer
+/// constants therefore bail to the general path, which rounds each pixel's
+/// coordinate individually.
+fn translation_offsets(
+    source: &RgbaImage,
+    out_w: u32,
+    out_h: u32,
+    scale: f64,
+    offset: Point,
+    rotation: f32,
+) -> Option<(i64, i64)> {
+    // Exact zero after normalisation only — any real rotation angle needs
+    // the trigonometric path. `normalize_rotation` maps full turns (±360°,
+    // 720°, …) to exactly 0.0, so those take the fast path too.
+    if normalize_rotation(rotation) != 0.0 {
+        return None;
+    }
+    let cx = f64::from(source.width()) / 2.0 - f64::from(out_w) / 2.0 - f64::from(offset.x) / scale;
+    let cy =
+        f64::from(source.height()) / 2.0 - f64::from(out_h) / 2.0 - f64::from(offset.y) / scale;
+    // The half-integer tie bail-out described above. Exact comparison is
+    // deliberate: only the one value where round's tie-breaking engages is
+    // affected, and `fract()` of any finite f64 is exact.
+    if cx.fract().abs() == 0.5 || cy.fract().abs() == 0.5 {
+        return None;
+    }
+    Some((cx.round() as i64, cy.round() as i64))
+}
+
+/// The unrotated fast path: the crop is `source` shifted by the integer
+/// vector `(tx, ty)` from [`translation_offsets`]. Computes the overlapping
+/// output row/column ranges once, then block-copies one contiguous
+/// 4-bytes-per-pixel source row segment per output row; rows and columns
+/// outside the overlap keep the buffer's transparent zero fill.
+fn raster_translation(
+    source: &RgbaImage,
+    out_w: u32,
+    out_h: u32,
+    tx: i64,
+    ty: i64,
+    pixels: &mut [u8],
+) {
+    let src_w = i64::from(source.width());
+    let src_h = i64::from(source.height());
+
+    // The overlap on each axis: the output indices where `0 <= o + t <
+    // src`. Saturating arithmetic because `tx`/`ty` came through a
+    // saturating float-to-int cast and may sit at `i64`'s limits, where
+    // plain negation/subtraction would overflow; any such translation has
+    // an empty overlap, which the clamp preserves.
+    let ox_start = tx.saturating_neg().clamp(0, i64::from(out_w));
+    let ox_end = src_w.saturating_sub(tx).clamp(0, i64::from(out_w));
+    let oy_start = ty.saturating_neg().clamp(0, i64::from(out_h));
+    let oy_end = src_h.saturating_sub(ty).clamp(0, i64::from(out_h));
+    if ox_start >= ox_end || oy_start >= oy_end {
+        // No overlap — the output stays fully transparent, the same result
+        // the per-pixel bounds check produces sample by sample.
+        return;
+    }
+
+    let src_raw: &[u8] = source.as_raw();
+    let out_row_len = out_w as usize * 4;
+    let src_row_len = source.width() as usize * 4;
+    let seg_len = (ox_end - ox_start) as usize * 4;
+    let src_x0 = (ox_start + tx) as usize * 4;
+
+    for oy in oy_start..oy_end {
+        // `oy + ty` is in `[0, src_h)` by the range construction above, so
+        // both slices below are in bounds by construction.
+        let src_at = (oy + ty) as usize * src_row_len + src_x0;
+        let dst_at = oy as usize * out_row_len + ox_start as usize * 4;
+        pixels[dst_at..dst_at + seg_len].copy_from_slice(&src_raw[src_at..src_at + seg_len]);
+    }
+}
+
+/// The general inverse-sampling path, for any rotation: walks every output
+/// pixel, stepping the source coordinate incrementally instead of
+/// re-evaluating the full map. The map is affine in `(ox, oy)` — writing
+/// `dx = (ox - out_w / 2) * scale - offset.x` (`dy` likewise) it reads
+/// `sx = (dx * cos_inv - dy * sin_inv) / scale + src_w / 2` and
+/// `sy = (dx * sin_inv + dy * cos_inv) / scale + src_h / 2` — so its
+/// partial derivatives are constants: `cos_inv`/`sin_inv` per column and
+/// `-sin_inv`/`cos_inv` per row. One start evaluation and two additions per
+/// pixel replace the per-pixel multiplies and divides.
+fn raster_general(
+    source: &RgbaImage,
+    out_w: u32,
+    out_h: u32,
+    scale: f64,
+    offset: Point,
+    rotation: f32,
+    pixels: &mut [u8],
+) {
+    let (src_w, src_h) = (source.width(), source.height());
+    let rotation_rad = f64::from(rotation).to_radians();
+    // Sampling needs the INVERSE rotation (see module doc): `Rotate(-rotation)`.
+    let (sin_inv, cos_inv) = (-rotation_rad).sin_cos();
+
+    // The inverse map evaluated once, at output pixel (0, 0); everything
+    // after is accumulator stepping.
+    let dx0 = (0.0 - f64::from(out_w) / 2.0) * scale - f64::from(offset.x);
+    let dy0 = (0.0 - f64::from(out_h) / 2.0) * scale - f64::from(offset.y);
+    let mut row_sx = (dx0 * cos_inv - dy0 * sin_inv) / scale + f64::from(src_w) / 2.0;
+    let mut row_sy = (dx0 * sin_inv + dy0 * cos_inv) / scale + f64::from(src_h) / 2.0;
+
+    let src_raw: &[u8] = source.as_raw();
+    let src_row_len = src_w as usize * 4;
+
+    for row in pixels.chunks_exact_mut(out_w as usize * 4) {
+        let (mut sx, mut sy) = (row_sx, row_sy);
+        for px in row.chunks_exact_mut(4) {
+            // Nearest-neighbour bounds semantics, preserved exactly:
+            // - `.round()` breaks ties away from zero;
+            // - a coordinate rounding to `-0.0` (from e.g. `-0.3`) passes
+            //   `>= 0.0` and samples index 0 — the negative side's first
+            //   out-of-bounds result is `-1.0`, reached from `-0.5` out;
+            // - the `as u32` casts saturate, so an upper-side excess lands
+            //   at `u32::MAX` and fails the width/height check.
+            // No per-pixel finiteness checks are needed: the caller
+            // validated offset/zoom/rotation as finite and `scale` as
+            // positive, and were an extreme-but-finite combination still to
+            // overflow into infinity or NaN here, NaN fails `>= 0.0` and
+            // infinity saturates out of bounds — both fall through to the
+            // transparent fill, exactly like any other out-of-source
+            // sample.
+            let ix = sx.round();
+            let iy = sy.round();
+            if ix >= 0.0 && iy >= 0.0 {
+                let (ix, iy) = (ix as u32, iy as u32);
+                if ix < src_w && iy < src_h {
+                    let at = iy as usize * src_row_len + ix as usize * 4;
+                    px.copy_from_slice(&src_raw[at..at + 4]);
+                }
+            }
+            sx += cos_inv;
+            sy += sin_inv;
+        }
+        row_sx -= sin_inv;
+        row_sy += cos_inv;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+
+    /// A deterministic multi-channel gradient: every pixel differs from its
+    /// neighbours in at least one channel, so a one-pixel sampling shift
+    /// changes bytes somewhere.
+    fn gradient_source(width: u32, height: u32) -> RgbaImage {
+        RgbaImage::from_fn(width, height, |x, y| {
+            Rgba([
+                (x * 7 % 251) as u8,
+                (y * 13 % 241) as u8,
+                ((x + y) * 3 % 253) as u8,
+                255,
+            ])
+        })
+    }
+
+    /// Direct, non-incremental f64 evaluation of the module doc's inverse
+    /// map at every output pixel — the reference both production paths must
+    /// reproduce byte-for-byte.
+    fn reference_raster(
+        source: &RgbaImage,
+        out_w: u32,
+        out_h: u32,
+        scale: f64,
+        offset: Point,
+        rotation: f32,
+    ) -> Vec<u8> {
+        let rotation_rad = f64::from(rotation).to_radians();
+        let (sin_inv, cos_inv) = (-rotation_rad).sin_cos();
+        let mut pixels = vec![0u8; out_w as usize * out_h as usize * 4];
+        for oy in 0..out_h {
+            for ox in 0..out_w {
+                let dx = (f64::from(ox) - f64::from(out_w) / 2.0) * scale - f64::from(offset.x);
+                let dy = (f64::from(oy) - f64::from(out_h) / 2.0) * scale - f64::from(offset.y);
+                let sx = (dx * cos_inv - dy * sin_inv) / scale + f64::from(source.width()) / 2.0;
+                let sy = (dx * sin_inv + dy * cos_inv) / scale + f64::from(source.height()) / 2.0;
+                let (ix, iy) = (sx.round(), sy.round());
+                if ix >= 0.0 && iy >= 0.0 {
+                    let (ix, iy) = (ix as u32, iy as u32);
+                    if ix < source.width() && iy < source.height() {
+                        let at = (oy as usize * out_w as usize + ox as usize) * 4;
+                        pixels[at..at + 4].copy_from_slice(&source.get_pixel(ix, iy).0);
+                    }
+                }
+            }
+        }
+        pixels
+    }
+
+    /// Fast path vs general path, byte-equal, across a deterministic
+    /// parameter matrix at rotation 0: even/odd source dimensions, even/odd
+    /// output dimensions, integer and fractional offsets, zooms below and
+    /// above 1, and several viewport/stencil framings.
+    #[test]
+    fn translation_path_matches_general_path_at_rotation_zero() {
+        let sources = [(16u32, 16u32), (17, 13)];
+        let framings = [
+            (Size::new(32.0, 32.0), Stencil::rectangle(16.0, 16.0)),
+            (Size::new(24.0, 18.0), Stencil::rectangle(15.0, 9.0)),
+            (Size::new(20.0, 20.0), Stencil::square(13.0)),
+        ];
+        let offsets = [
+            Point::ZERO,
+            Point::new(3.0, -2.0),
+            Point::new(0.25, 0.75),
+            Point::new(-5.5, 4.25),
+        ];
+        let zooms = [0.5f32, 1.0, 1.7, 2.0];
+
+        let mut compared = 0usize;
+        for (src_w, src_h) in sources {
+            let source = gradient_source(src_w, src_h);
+            let natural = Size::new(src_w as f32, src_h as f32);
+            for (viewport, stencil) in framings {
+                for offset in offsets {
+                    for zoom in zooms {
+                        let (out_w, out_h) = output_size(natural, viewport, stencil, zoom)
+                            .expect("grid parameters are valid");
+                        let scale = f64::from(contain_scale(natural, viewport)) * f64::from(zoom);
+                        // Half-integer ties are the general path's job by
+                        // design — the matrix compares eligible cases.
+                        let Some((tx, ty)) =
+                            translation_offsets(&source, out_w, out_h, scale, offset, 0.0)
+                        else {
+                            continue;
+                        };
+                        let len = out_w as usize * out_h as usize * 4;
+                        let mut fast = vec![0u8; len];
+                        raster_translation(&source, out_w, out_h, tx, ty, &mut fast);
+                        let mut general = vec![0u8; len];
+                        raster_general(&source, out_w, out_h, scale, offset, 0.0, &mut general);
+                        assert_eq!(
+                            fast,
+                            general,
+                            "paths diverged: source {src_w}x{src_h}, viewport {}x{}, stencil \
+                             {}x{}, offset ({}, {}), zoom {zoom}",
+                            viewport.width,
+                            viewport.height,
+                            stencil.width(),
+                            stencil.height(),
+                            offset.x,
+                            offset.y,
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            compared >= 50,
+            "only {compared} eligible cases — widen the grid"
+        );
+    }
+
+    /// Constructs an exact half-integer translation constant: `fit_scale =
+    /// 1`, `zoom = 1`, a 10-wide source and a 15-wide output give `Cx = 5 -
+    /// 7.5 - 0 = -2.5`. `round(-2.5)` is `-3` (ties away from zero), so a
+    /// blanket translation would sample `ox - 3` everywhere while the
+    /// per-pixel formula at e.g. `ox = 3` samples `round(0.5) = 1` — a
+    /// whole-column divergence. The tie must route to the general path, and
+    /// the result must still match the reference per-pixel formula.
+    #[test]
+    fn half_integer_translation_tie_routes_to_the_general_path() {
+        let source = gradient_source(10, 10);
+        let natural = Size::new(10.0, 10.0);
+        let viewport = Size::new(10.0, 10.0);
+        let stencil = Stencil::rectangle(15.0, 15.0);
+        let (out_w, out_h) = output_size(natural, viewport, stencil, 1.0).expect("valid inputs");
+        assert_eq!((out_w, out_h), (15, 15));
+        let scale = f64::from(contain_scale(natural, viewport));
+        assert_eq!(scale, 1.0);
+
+        assert!(
+            translation_offsets(&source, out_w, out_h, scale, Point::ZERO, 0.0).is_none(),
+            "a half-integer constant must not be treated as a translation"
+        );
+        let produced = rasterize(&source, out_w, out_h, scale, Point::ZERO, 0.0);
+        let reference = reference_raster(&source, out_w, out_h, scale, Point::ZERO, 0.0);
+        assert_eq!(produced, reference);
+    }
+
+    /// The general path's incremental (accumulator) stepping against a
+    /// direct per-pixel evaluation of the same f64 map, byte-equal — guards
+    /// the start values and the step constants of the accumulation.
+    #[test]
+    fn general_path_stepping_matches_direct_evaluation_at_rotation_zero() {
+        let cases = [
+            (
+                40u32,
+                30u32,
+                Size::new(20.0, 20.0),
+                Stencil::rectangle(16.0, 10.0),
+                Point::new(0.3, -1.7),
+                1.0f32,
+            ),
+            (
+                64,
+                64,
+                Size::new(32.0, 32.0),
+                Stencil::square(19.0),
+                Point::new(2.25, 3.5),
+                1.3,
+            ),
+            // A low zoom blows the output up to several hundred pixels per
+            // side: enough columns that even a tiny per-step error in the
+            // accumulation drifts across a rounding boundary somewhere.
+            (
+                200,
+                160,
+                Size::new(100.0, 100.0),
+                Stencil::rectangle(90.0, 70.0),
+                Point::new(-3.3, 1.75),
+                0.25,
+            ),
+        ];
+        for (src_w, src_h, viewport, stencil, offset, zoom) in cases {
+            let source = gradient_source(src_w, src_h);
+            let natural = Size::new(src_w as f32, src_h as f32);
+            let (out_w, out_h) =
+                output_size(natural, viewport, stencil, zoom).expect("valid inputs");
+            let scale = f64::from(contain_scale(natural, viewport)) * f64::from(zoom);
+            let mut general = vec![0u8; out_w as usize * out_h as usize * 4];
+            raster_general(&source, out_w, out_h, scale, offset, 0.0, &mut general);
+            let reference = reference_raster(&source, out_w, out_h, scale, offset, 0.0);
+            assert_eq!(general, reference, "case {src_w}x{src_h}, zoom {zoom}");
+        }
+    }
+
+    /// A source whose header claims a dimension beyond the decode cap is
+    /// refused before any pixel work, as `CropError::Decode`.
+    #[test]
+    fn decode_refuses_oversized_dimensions() {
+        let wide = RgbaImage::new(MAX_SOURCE_DIMENSION + 1, 1);
+        let mut bytes = Vec::new();
+        wide.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("encode oversized fixture");
+        assert!(matches!(
+            DecodedSource::decode(&bytes),
+            Err(CropError::Decode(_))
+        ));
     }
 }
