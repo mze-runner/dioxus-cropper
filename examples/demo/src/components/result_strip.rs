@@ -10,7 +10,9 @@ use crate::icons::IconDownload;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct ResultStripProps {
-    pub data_uri: Arc<str>,
+    /// Object URL over the crop's PNG bytes — the thumbnail's `src` and
+    /// the download link's `href`. The caller owns its revocation.
+    pub url: Arc<str>,
     pub width: u32,
     pub height: u32,
     pub format: String,
@@ -33,7 +35,7 @@ pub fn ResultStrip(props: ResultStripProps) -> Element {
             img {
                 class: "cr-thumb",
                 style: "border-radius: {border_radius}; object-fit: contain;",
-                src: "{props.data_uri}",
+                src: "{props.url}",
                 alt: "Cropped result",
             }
             div { class: "cr-result-meta",
@@ -43,12 +45,12 @@ pub fn ResultStrip(props: ResultStripProps) -> Element {
                 }
             }
             span { style: "flex: 1;" }
-            // A plain `<a download>` — the browser handles saving a `data:`
-            // URI natively, no JS/web_sys anchor-click dance needed.
+            // A plain `<a download>` — the browser saves an object URL's
+            // blob natively, no JS/web_sys anchor-click dance needed.
             a {
                 class: "cr-ctrl",
                 style: "width: auto; padding: 0 12px; text-decoration: none;",
-                href: "{props.data_uri}",
+                href: "{props.url}",
                 "download": "cropped-image.png",
                 IconDownload { size: 15 }
                 "Download"

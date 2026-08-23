@@ -6,13 +6,13 @@
 
 mod components;
 mod icons;
+mod object_url;
 mod paint;
 mod types;
 
-use std::sync::Arc;
+use std::io::Cursor;
+use std::sync::{Arc, OnceLock};
 
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine as _;
 use dioxus::prelude::*;
 use dioxus_cropper::geometry::{
     clamp_offset, contain_scale, min_zoom_to_cover, normalize_rotation, Point, Size, Stencil,
@@ -24,7 +24,7 @@ use dioxus_cropper::{
 
 use components::{
     PositionGroup, ResultStrip, RotateGroup, ShapeGroup, SourceGroup, Stage, StageReadout,
-    StageSource, TuningGroup, ZoomGroup,
+    StageSource, TimingReadout, TuningGroup, ZoomGroup,
 };
 use icons::IconCrop;
 use types::{CursorChoice, ShapeKind, ViewportPreset};
@@ -55,35 +55,45 @@ const MAX_ZOOM: f32 = 8.0;
 /// arbitrary choice, not a value the crate prescribes.
 const WHEEL_ZOOM_STEP: f32 = 0.001;
 
-/// `data_uri` is `Arc<str>` and `decoded` is backed by an `Arc` internally,
-/// so cloning this whole struct out of the `image` signal — the read
-/// pattern every callback below uses — is a few refcount bumps plus one
-/// heap allocation for `file_name: String`, not a copy of the picked file's
-/// bytes or its base64 encoding.
+/// Every field but `file_name` is an `Arc`, so cloning this whole struct
+/// out of the `image` signal — the read pattern every callback below uses —
+/// is a few refcount bumps plus one heap allocation for
+/// `file_name: String`, not a copy of the picked file's bytes or pixels.
 #[derive(Clone)]
 struct LoadedImage {
     file_name: String,
-    /// `data:` URI built from the ORIGINAL file bytes, base64-encoded —
-    /// never a re-encode of the decoded pixels.
-    data_uri: Arc<str>,
+    /// Object URL over a `Blob` of the ORIGINAL file bytes — what the
+    /// browser renders in the stage. Revoked when the next pick replaces
+    /// it.
+    src_url: Arc<str>,
+    /// The picked file's raw, undecoded bytes, kept for the deferred
+    /// pixel decode on the first Crop press.
+    bytes: Arc<[u8]>,
+    /// From the image header alone (`ImageReader::into_dimensions`) — no
+    /// pixel decode happens at pick time.
     natural_size: Size,
-    /// Decoded once and reused for every crop press, per the crate's own
-    /// guidance (`DecodedSource::decode`'s doc comment).
-    decoded: DecodedSource,
+    /// Filled by the first Crop press that decodes successfully and reused
+    /// by every press after it, per the crate's own guidance
+    /// (`DecodedSource::decode`'s doc comment). Empty until then — picking
+    /// a file costs a header probe, not a full decode.
+    decoded: Arc<OnceLock<DecodedSource>>,
 }
 
 #[derive(Clone)]
 struct CroppedResult {
-    data_uri: Arc<str>,
+    /// Object URL over the crop's PNG bytes. Revoked when the next crop
+    /// replaces it or the next pick clears it.
+    url: Arc<str>,
     width: u32,
     height: u32,
     size_bytes: usize,
 }
 
-/// The demo's single busy state, covering both spans of synchronous,
-/// CPU-bound work it drives: decoding a picked file and running the crop.
-/// One signal for both — the file picker and the Crop button never run at
-/// the same time, so there is only ever one thing to be busy with.
+/// The demo's single busy state, covering both spans of work it drives:
+/// reading and header-probing a picked file, and running the crop — which
+/// on the first press also performs the deferred pixel decode. One signal
+/// for both — the file picker and the Crop button never run at the same
+/// time, so there is only ever one thing to be busy with.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Busy {
     #[default]
@@ -98,8 +108,62 @@ impl Busy {
     }
 }
 
-fn to_data_uri(mime: &str, bytes: &[u8]) -> Arc<str> {
-    Arc::from(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
+/// Wall-clock stage durations for the timing readout under the stage.
+/// Pick-time stages (`read_ms`, `probe_ms`) are written by the file
+/// picker, crop-time stages by the Crop press; `None` means the stage has
+/// not run for the current image and the readout shows only what has.
+#[derive(Clone, Copy, Default)]
+struct StageTimings {
+    read_ms: Option<f64>,
+    probe_ms: Option<f64>,
+    decode: Option<DecodeTiming>,
+    crop_ms: Option<f64>,
+    url_ms: Option<f64>,
+}
+
+/// The decode stage runs at most once per picked file — after that a press
+/// hits the cache, which is worth showing as such rather than as a
+/// suspicious 0 ms.
+#[derive(Clone, Copy)]
+enum DecodeTiming {
+    Ran(f64),
+    Cached,
+}
+
+/// Formats a stage duration: one decimal below 10 ms so a sub-millisecond
+/// header probe doesn't read as the misleading "0 ms", whole milliseconds
+/// above.
+fn format_ms(ms: f64) -> String {
+    if ms < 10.0 {
+        format!("{ms:.1}")
+    } else {
+        format!("{ms:.0}")
+    }
+}
+
+/// The one-line stage summary, e.g.
+/// `read 12 ms · probe 0.4 ms · decode 840 ms · crop 130 ms` — only stages
+/// that have run appear. `None` until a file is picked.
+fn timing_line(timings: &StageTimings) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(ms) = timings.read_ms {
+        parts.push(format!("read {} ms", format_ms(ms)));
+    }
+    if let Some(ms) = timings.probe_ms {
+        parts.push(format!("probe {} ms", format_ms(ms)));
+    }
+    match timings.decode {
+        Some(DecodeTiming::Ran(ms)) => parts.push(format!("decode {} ms", format_ms(ms))),
+        Some(DecodeTiming::Cached) => parts.push("decode cached".to_string()),
+        None => {}
+    }
+    if let Some(ms) = timings.crop_ms {
+        parts.push(format!("crop {} ms", format_ms(ms)));
+    }
+    if let Some(ms) = timings.url_ms {
+        parts.push(format!("url {} ms", format_ms(ms)));
+    }
+    (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
 }
 
 /// Formats a byte count for the result readout — whole KiB once the value
@@ -211,7 +275,10 @@ fn apply_view_edit(
     view.set(vw);
 }
 
-/// Runs the crop against the already-decoded source and writes the outcome.
+/// Runs the deferred pixel decode (first press only — cached thereafter)
+/// and the crop, then publishes the result under a fresh object URL. Stage
+/// wall times land in `timings` on success, joining the pick-time entries
+/// already there.
 fn do_crop_now(
     loaded: LoadedImage,
     view: ViewTransform,
@@ -219,17 +286,72 @@ fn do_crop_now(
     viewport: Size,
     mut cropped: Signal<Option<CroppedResult>>,
     mut error: Signal<Option<String>>,
+    mut timings: Signal<StageTimings>,
 ) {
-    match crop_decoded_to_png(&loaded.decoded, view, stencil, viewport) {
+    // The one-and-only decode of the picked file, deferred from pick time
+    // to here. A failure is NOT cached — the `OnceLock` stays empty, so
+    // pressing Crop again retries the decode instead of replaying a stale
+    // error. This is also where a header-valid file with a corrupt body
+    // (which the pick-time probe cannot see) surfaces.
+    let decode;
+    let decoded = match loaded.decoded.get() {
+        Some(cached) => {
+            decode = DecodeTiming::Cached;
+            cached
+        }
+        None => {
+            let started = js_sys::Date::now();
+            match DecodedSource::decode(&loaded.bytes) {
+                Ok(fresh) => {
+                    decode = DecodeTiming::Ran(js_sys::Date::now() - started);
+                    loaded.decoded.get_or_init(|| fresh)
+                }
+                Err(e) => {
+                    error.set(Some(format!("crop failed: {e}")));
+                    return;
+                }
+            }
+        }
+    };
+
+    let started = js_sys::Date::now();
+    match crop_decoded_to_png(decoded, view, stencil, viewport) {
         Ok(result) => {
-            let data_uri = to_data_uri("image/png", &result.png_bytes);
+            let crop_ms = js_sys::Date::now() - started;
+
+            let started = js_sys::Date::now();
+            let url = match object_url::create(&result.png_bytes, "image/png") {
+                Ok(url) => url,
+                Err(e) => {
+                    error.set(Some(format!("could not create a URL for the result: {e}")));
+                    return;
+                }
+            };
+            let url_ms = js_sys::Date::now() - started;
+
+            // Replacement-time release: the result strip re-renders off the
+            // old URL in the same pass that adopts the new one, and a blob
+            // URL's revocation only blocks NEW fetches — the old thumbnail
+            // stays painted for the instant it remains on screen.
+            if let Some(previous) = cropped.peek().as_ref() {
+                object_url::revoke(&previous.url);
+            }
             cropped.set(Some(CroppedResult {
-                data_uri,
+                url,
                 width: result.width,
                 height: result.height,
                 size_bytes: result.png_bytes.len(),
             }));
             error.set(None);
+
+            // Extends the pick-time read/probe entries rather than
+            // replacing them — one line tells the whole story of the
+            // current image.
+            let mut t = *timings.peek();
+            t.decode = Some(decode);
+            t.crop_ms = Some(crop_ms);
+            t.url_ms = Some(url_ms);
+            timings.set(t);
         }
         Err(e) => error.set(Some(format!("crop failed: {e}"))),
     }
@@ -245,6 +367,7 @@ fn App() -> Element {
     let mut view = use_signal(ViewTransform::default);
     let mut cropped = use_signal(|| Option::<CroppedResult>::None);
     let mut error = use_signal(|| Option::<String>::None);
+    let mut timings = use_signal(StageTimings::default);
 
     let mut shape = use_signal(ShapeKind::default);
     let mut viewport_preset = use_signal(ViewportPreset::default);
@@ -271,7 +394,7 @@ fn App() -> Element {
         // landed — this check is the correctness mechanism regardless of
         // whether that render has happened yet. Also covers the input
         // firing `onchange` again (e.g. an OS file-manager quirk) while a
-        // previous pick is still decoding.
+        // previous pick is still being read.
         if busy.peek().is_busy() {
             return;
         }
@@ -286,9 +409,11 @@ fn App() -> Element {
             busy.set(Busy::Loading);
             paint::wait_for_paint().await;
 
-            // A failed read or decode leaves whatever image, view and result
-            // were already loaded unchanged — e.g. an OS-offered
-            // HEIC/AVIF/BMP/TIFF the crate's `image` build does not decode.
+            // A failed read, header probe or URL construction leaves
+            // whatever image, view and result were already loaded
+            // unchanged — e.g. an OS-offered HEIC/AVIF/BMP/TIFF this
+            // demo's `image` build has no reader for.
+            let started = js_sys::Date::now();
             let bytes = match file.read_bytes().await {
                 Ok(bytes) => bytes,
                 Err(e) => {
@@ -297,26 +422,71 @@ fn App() -> Element {
                     return;
                 }
             };
-            let decoded = match DecodedSource::decode(&bytes) {
-                Ok(decoded) => decoded,
+            let read_ms = js_sys::Date::now() - started;
+
+            // Header-only probe: `into_dimensions` reads just enough of
+            // the container to learn the pixel dimensions — the full
+            // decode is deferred to the first Crop press. A file whose
+            // header lies about its body still passes here; that surfaces
+            // at crop time as a decode error through the same readout.
+            let started = js_sys::Date::now();
+            let dimensions = image::ImageReader::new(Cursor::new(&bytes))
+                .with_guessed_format()
+                .map_err(|e| e.to_string())
+                .and_then(|reader| reader.into_dimensions().map_err(|e| e.to_string()));
+            let (width, height) = match dimensions {
+                Ok(dims) => dims,
                 Err(e) => {
-                    error.set(Some(format!("could not decode \"{file_name}\": {e}")));
+                    error.set(Some(format!(
+                        "could not read the image header of \"{file_name}\": {e}"
+                    )));
                     busy.set(Busy::Idle);
                     return;
                 }
             };
-            let natural_size = decoded.natural_size();
-            let data_uri = to_data_uri(&content_type, &bytes);
+            let probe_ms = js_sys::Date::now() - started;
+            let natural_size = Size::new(width as f32, height as f32);
+
+            let src_url = match object_url::create(&bytes, &content_type) {
+                Ok(url) => url,
+                Err(e) => {
+                    error.set(Some(format!(
+                        "could not create a URL for \"{file_name}\": {e}"
+                    )));
+                    busy.set(Busy::Idle);
+                    return;
+                }
+            };
+
+            // Replacement-time release of the previous pick's URLs: the
+            // stage and result strip re-render off them in the same pass
+            // that adopts the new image, and a blob URL's revocation only
+            // blocks NEW fetches — the old image stays painted for the
+            // instant it remains on screen. This root component never
+            // unmounts, so replacement is the one moment they can be
+            // released.
+            if let Some(previous) = image.peek().as_ref() {
+                object_url::revoke(&previous.src_url);
+            }
+            if let Some(previous) = cropped.peek().as_ref() {
+                object_url::revoke(&previous.url);
+            }
 
             image.set(Some(LoadedImage {
                 file_name,
-                data_uri,
+                src_url,
+                bytes: Arc::from(bytes.as_ref()),
                 natural_size,
-                decoded,
+                decoded: Arc::new(OnceLock::new()),
             }));
             view.set(fresh_view(natural_size, vp_size(), stencil(), restrict()));
             cropped.set(None);
             error.set(None);
+            timings.set(StageTimings {
+                read_ms: Some(read_ms),
+                probe_ms: Some(probe_ms),
+                ..StageTimings::default()
+            });
             busy.set(Busy::Idle);
         });
     };
@@ -391,10 +561,10 @@ fn App() -> Element {
         spawn(async move {
             busy.set(Busy::Cropping);
             // Yields so a render lands with the button disabled and
-            // relabelled before the synchronous resample + PNG-encode work
-            // below runs and blocks the thread.
+            // relabelled before the synchronous decode (first press only) +
+            // resample + PNG-encode work below runs and blocks the thread.
             paint::wait_for_paint().await;
-            do_crop_now(loaded, vw, st, vp, cropped, error);
+            do_crop_now(loaded, vw, st, vp, cropped, error, timings);
             busy.set(Busy::Idle);
         });
     };
@@ -446,7 +616,7 @@ fn App() -> Element {
 
     let file_name = loaded.as_ref().map(|l| l.file_name.clone());
     let stage_source = loaded.as_ref().map(|l| StageSource {
-        data_uri: l.data_uri.clone(),
+        src_url: l.src_url.clone(),
         natural_size: l.natural_size,
     });
 
@@ -486,6 +656,9 @@ fn App() -> Element {
                             zoom_pct: zoom_pct_display,
                             rotation_deg: rotation_display,
                         }
+                        if let Some(line) = timing_line(&timings.read()) {
+                            TimingReadout { line }
+                        }
                     }
 
                     if loaded.is_some() {
@@ -503,7 +676,7 @@ fn App() -> Element {
 
                     if let Some(result) = result {
                         ResultStrip {
-                            data_uri: result.data_uri,
+                            url: result.url,
                             width: result.width,
                             height: result.height,
                             format: "PNG".to_string(),

@@ -8,9 +8,10 @@ use crate::icons::IconImagePlaceholder;
 #[derive(Props, Clone, PartialEq)]
 pub struct SourceGroupProps {
     pub file_name: Option<String>,
-    /// True while the picked file's bytes are being read and decoded. The
-    /// input is disabled and relabelled for the duration — the caller owns
-    /// the busy state, this component only renders it.
+    /// True while the picked file's bytes are being read and its header
+    /// probed for dimensions. The input is disabled and relabelled for the
+    /// duration — the caller owns the busy state, this component only
+    /// renders it.
     pub loading: bool,
     pub on_pick: EventHandler<FormEvent>,
 }

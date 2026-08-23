@@ -11,13 +11,13 @@ use dioxus_cropper::{Cropper, CropperClasses, CropperCursor, PanDirection};
 
 use crate::icons::IconImagePlaceholder;
 
-/// The picked image's renderable source, as `Stage` needs it — a data URI
-/// plus the decoded natural size `Cropper` requires for its own fit maths.
-/// `data_uri` is `Arc<str>` so passing it down each render is a refcount
-/// bump, not a copy of the base64 string.
+/// The picked image's renderable source, as `Stage` needs it — an object
+/// URL over the original file bytes plus the header-probed natural size
+/// `Cropper` requires for its own fit maths. `src_url` is `Arc<str>` so
+/// passing it down each render is a refcount bump.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StageSource {
-    pub data_uri: Arc<str>,
+    pub src_url: Arc<str>,
     pub natural_size: Size,
 }
 
@@ -46,7 +46,7 @@ pub fn Stage(props: StageProps) -> Element {
 
             if let Some(source) = props.loaded {
                 Cropper {
-                    src: source.data_uri,
+                    src: source.src_url,
                     natural_size: source.natural_size,
                     view: props.view,
                     stencil: props.stencil,

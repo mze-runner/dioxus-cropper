@@ -13,7 +13,7 @@ pub mod tuning_group;
 pub mod zoom_group;
 
 pub use position_group::PositionGroup;
-pub use readout::StageReadout;
+pub use readout::{StageReadout, TimingReadout};
 pub use result_strip::ResultStrip;
 pub use rotate_group::RotateGroup;
 pub use shape_group::ShapeGroup;
