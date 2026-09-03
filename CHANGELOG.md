@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `crop_decoded`, cropping to a caller-chosen output target: `CropOutput`
+  pairs a `SizeTarget` (`Native`, `Exact`, `MaxDimension`) with an
+  `OutputFormat` (`Png`, `Jpeg(JpegOptions)`, raw `Rgba`), returning a
+  `CroppedOutput` with the bytes and their `CroppedFormat`. Downscales are
+  area-averaged, upscales bilinear; JPEG output composites transparency
+  onto `JpegOptions::background`.
+- `output_size_with`, predicting the final output dimensions for a
+  `SizeTarget` without decoding or sampling.
+- `CropError::InvalidOutputTarget`, returned for a zero `Exact` dimension,
+  a zero `MaxDimension`, or a JPEG quality outside `1..=100`.
+- `docs/known-limitations.md`, documenting that EXIF orientation is not
+  applied.
 - Criterion benchmark suite under `benches/`, covering decode, the full crop
   pass and PNG encode against deterministic synthetic fixtures.
 
@@ -19,8 +31,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   new results follow the documented screen-to-source transform exactly,
   where the previous `f32` arithmetic broke such ties inconsistently.
 - Unrotated crops copy source rows directly; rotated crops advance the
-  inverse transform incrementally instead of re-deriving it per pixel.
-  Large-source crops are substantially faster — measurements in
+  inverse transform incrementally instead of re-deriving it per pixel. The
+  sampling stage is substantially faster; end-to-end crop time improves
+  most where PNG encoding does not dominate — measurements in
   `docs/perf-baseline.md`.
 - PNG encoding pins its settings explicitly (fast compression with
   adaptive filtering — the encoder's previous effective defaults) and

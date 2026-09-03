@@ -14,7 +14,7 @@ A headless image cropper component for Dioxus.
 
 ```toml
 [dependencies]
-dioxus-cropper = "0.0.2"
+dioxus-cropper = "0.0.3"
 ```
 
 Select a Dioxus renderer feature (`web`, `desktop`, etc.) in the consuming crate.
@@ -38,7 +38,7 @@ fn app() -> Element {
 
     rsx! {
         Cropper {
-            src: "data:image/png;base64,",
+            src: "/assets/photo.jpg",
             natural_size,
             view: view(),
             stencil,
@@ -58,6 +58,8 @@ fn app() -> Element {
 ```
 
 `natural_size` must be the source image's real decoded pixel dimensions (`DecodedSource::natural_size`). `view`, `stencil` and `viewport` describe the current state; the component does not persist or mutate any of them.
+
+For a user-picked file on the web target, pass an object URL (`URL.createObjectURL` over a `Blob` of the file bytes) as `src` rather than a `data:` URI — an object URL is a constant-size handle, where a `data:` URI embeds the whole base64-encoded image in the DOM attribute. Revoke a replaced object URL with `URL.revokeObjectURL`.
 
 ## Producing a crop
 
@@ -82,11 +84,28 @@ use dioxus_cropper::output_size;
 let (width, height) = output_size(natural_size, viewport, stencil, view.zoom)?;
 ```
 
+## Target output
+
+`crop_decoded` extends `crop_decoded_to_png` with an output target: a size (`Native` — the default, today's "as is" behaviour; `Exact` — fixed dimensions regardless of the crop's native size; `MaxDimension` — a cap on the longer side, never upscaling) and a format (`Png`, `Jpeg`, or raw `Rgba` bytes). Downscaling area-averages; upscaling is bilinear. JPEG has no alpha channel, so transparent pixels are composited onto `JpegOptions::background`:
+
+```rust
+use dioxus_cropper::{crop_decoded, CropOutput, JpegOptions, OutputFormat, SizeTarget};
+
+let output = CropOutput {
+    size: SizeTarget::Exact { width: 512, height: 512 },
+    format: OutputFormat::Jpeg(JpegOptions::default()),
+};
+let cropped = crop_decoded(&decoded, view, stencil, viewport, output)?;
+// cropped.bytes, cropped.width, cropped.height, cropped.format
+```
+
+`output_size_with` predicts the final dimensions for a `SizeTarget` the same way `output_size` does for the native size.
+
 ## Configurable
 
 | Prop | Type | Purpose |
 |---|---|---|
-| `src` | `Arc<str>` (`#[props(into)]` — accepts `&str`, `String`, or `Arc<str>`) | Image source — URL or data URI. |
+| `src` | `Arc<str>` (`#[props(into)]` — accepts `&str`, `String`, or `Arc<str>`) | Image source — any URL the browser can render, an object URL included. |
 | `natural_size` | `Size` | The decoded image's real pixel dimensions. |
 | `view` | `ViewTransform` | Caller-owned offset, zoom, rotation. |
 | `stencil` | `Stencil` | The crop window — `Stencil::rectangle`, `Stencil::square`, or `Stencil::circle`. |
