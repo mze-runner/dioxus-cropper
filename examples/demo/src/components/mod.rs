@@ -2,6 +2,7 @@
 //! is props-in / markup-out — no signal reads, no business logic. `main.rs`
 //! owns all state and wires these together.
 
+pub mod output_group;
 pub mod position_group;
 pub mod readout;
 pub mod result_strip;
@@ -12,8 +13,9 @@ pub mod stage;
 pub mod tuning_group;
 pub mod zoom_group;
 
+pub use output_group::OutputGroup;
 pub use position_group::PositionGroup;
-pub use readout::StageReadout;
+pub use readout::{StageReadout, TimingReadout};
 pub use result_strip::ResultStrip;
 pub use rotate_group::RotateGroup;
 pub use shape_group::ShapeGroup;

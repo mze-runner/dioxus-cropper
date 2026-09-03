@@ -14,6 +14,22 @@ pub struct StageReadoutProps {
     pub rotation_deg: Option<String>,
 }
 
+/// The per-stage timing line under the main readout — how long the file
+/// read, header probe, decode, crop and result-URL build each took. Pure
+/// props: the caller assembles the line (and omits this component entirely
+/// while no stage has run yet), this only renders it.
+#[derive(Props, Clone, PartialEq)]
+pub struct TimingReadoutProps {
+    pub line: String,
+}
+
+#[component]
+pub fn TimingReadout(props: TimingReadoutProps) -> Element {
+    rsx! {
+        div { class: "cr-readout", "{props.line}" }
+    }
+}
+
 #[component]
 pub fn StageReadout(props: StageReadoutProps) -> Element {
     rsx! {

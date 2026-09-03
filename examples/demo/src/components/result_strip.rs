@@ -10,14 +10,19 @@ use crate::icons::IconDownload;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct ResultStripProps {
-    pub data_uri: Arc<str>,
+    /// Object URL over the crop's encoded bytes — the thumbnail's `src`
+    /// and the download link's `href`. The caller owns its revocation.
+    pub url: Arc<str>,
     pub width: u32,
     pub height: u32,
     pub format: String,
     pub size_label: String,
-    /// The stencil shape the crop was taken with. `crop_decoded_to_png`
-    /// returns a circle's unmasked square bounding box, for the caller to
-    /// round with CSS at display time — this is that rounding.
+    /// The filename the download link saves as — extension matching
+    /// `format`.
+    pub download_name: String,
+    /// The stencil shape the crop was taken with. `crop_decoded` returns a
+    /// circle's unmasked square bounding box, for the caller to round with
+    /// CSS at display time — this is that rounding.
     pub shape: StencilShape,
 }
 
@@ -33,7 +38,7 @@ pub fn ResultStrip(props: ResultStripProps) -> Element {
             img {
                 class: "cr-thumb",
                 style: "border-radius: {border_radius}; object-fit: contain;",
-                src: "{props.data_uri}",
+                src: "{props.url}",
                 alt: "Cropped result",
             }
             div { class: "cr-result-meta",
@@ -43,13 +48,13 @@ pub fn ResultStrip(props: ResultStripProps) -> Element {
                 }
             }
             span { style: "flex: 1;" }
-            // A plain `<a download>` — the browser handles saving a `data:`
-            // URI natively, no JS/web_sys anchor-click dance needed.
+            // A plain `<a download>` — the browser saves an object URL's
+            // blob natively, no JS/web_sys anchor-click dance needed.
             a {
                 class: "cr-ctrl",
                 style: "width: auto; padding: 0 12px; text-decoration: none;",
-                href: "{props.data_uri}",
-                "download": "cropped-image.png",
+                href: "{props.url}",
+                "download": "{props.download_name}",
                 IconDownload { size: 15 }
                 "Download"
             }

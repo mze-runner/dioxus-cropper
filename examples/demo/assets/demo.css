@@ -312,6 +312,11 @@ label.cr-ctrl:focus-within {
     color: #8090a8;
     font-weight: 600;
 }
+.cr-row-2 {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 5px;
+}
 .cr-row-3 {
     display: grid;
     grid-template-columns: repeat(3, 1fr);

@@ -7,12 +7,16 @@ publish = false
 [dependencies]
 dioxus = { version = "0.7", default-features = false, features = ["macro", "html", "signals", "hooks", "launch", "document", "asset", "devtools", "web"] }
 dioxus-cropper = { path = "../.." }
-base64 = "0.23"
 gloo-timers = { version = "0.3", features = ["futures"] }
-# `requestAnimationFrame`, for the paint-before-block yield in `paint.rs`.
-web-sys = { version = "0.3", features = ["Window"] }
+# `requestAnimationFrame` for the paint-before-block yield in `paint.rs`;
+# `Blob`/`URL.createObjectURL` for the object URLs in `object_url.rs`.
+web-sys = { version = "0.3", features = ["Window", "Blob", "BlobPropertyBag", "Url"] }
 js-sys = "0.3"
 wasm-bindgen-futures = "0.4"
+# Header-only dimension probing at file pick. Mirrors the root crate's own
+# `image` configuration so the picker never accepts a format the crop path
+# cannot decode.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [lints.clippy]
 unwrap_used = "deny"

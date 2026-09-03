@@ -1,7 +1,8 @@
 //! `dioxus-cropper` — a host-agnostic, pure-Rust image cropper component for
 //! Dioxus.
 //!
-//! The component takes a ready-to-render image source (a URL or a data URI)
+//! The component takes a ready-to-render image source (any URL the browser
+//! can render, an object URL included)
 //! and renders it inside a fixed, clipped viewport, positioned by a
 //! caller-controlled [`geometry::ViewTransform`] (offset, zoom, rotation). A
 //! [`geometry::Stencil`] marks the crop window inside the viewport, dimmed
@@ -37,7 +38,7 @@
 //!
 //!     rsx! {
 //!         Cropper {
-//!             src: "data:image/png;base64,",
+//!             src: "/assets/photo.jpg",
 //!             natural_size,
 //!             view: view(),
 //!             stencil,
@@ -70,6 +71,10 @@ use std::sync::Arc;
 
 pub mod crop;
 pub mod geometry;
+pub use crop::{
+    crop_decoded, output_size_with, CropOutput, CroppedFormat, CroppedOutput, JpegOptions,
+    OutputFormat, SizeTarget,
+};
 pub use crop::{
     crop_decoded_to_png, crop_to_png, output_size, CropError, CroppedImage, DecodedSource,
     MAX_OUTPUT_PIXELS,

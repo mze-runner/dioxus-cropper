@@ -1,6 +1,6 @@
 [package]
 name = "dioxus-cropper"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 rust-version = "1.88.0"
 license = "MIT OR Apache-2.0"
@@ -30,6 +30,24 @@ features = ["png", "jpeg", "gif", "webp"]
 [dev-dependencies]
 dioxus-ssr = "0.7"
 
+# HTML reports and criterion's own `rayon` are off — plain CLI output is all
+# the benches need, and single-threaded analysis matches the `rayon`-off
+# choice on `image` above.
+[dev-dependencies.criterion]
+version = "0.7"
+default-features = false
+features = ["cargo_bench_support"]
+
+[[bench]]
+name = "crop"
+harness = false
+
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+
+# The bundled binaryen's wasm-opt aborts on the DWARF version rustc emits
+# ("compile unit size was incorrect"); release artifacts carry no debug
+# info, so wasm-opt runs.
+[profile.release]
+strip = "debuginfo"
