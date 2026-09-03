@@ -1,0 +1,53 @@
+name: Deploy demo
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install dioxus-cli
+        run: cargo binstall dioxus-cli@0.7.10 --no-confirm
+
+      - name: Build demo
+        working-directory: examples/demo
+        # Pages serves the site under /dioxus-cropper/, so asset links need
+        # that base path.
+        run: dx build --release --base-path dioxus-cropper
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/dx/dioxus-cropper-demo/release/web/public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
