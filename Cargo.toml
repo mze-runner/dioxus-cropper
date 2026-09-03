@@ -45,3 +45,9 @@ harness = false
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+
+# The bundled binaryen's wasm-opt aborts on the DWARF version rustc emits
+# ("compile unit size was incorrect"); release artifacts carry no debug
+# info, so wasm-opt runs.
+[profile.release]
+strip = "debuginfo"
