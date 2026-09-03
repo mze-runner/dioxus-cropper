@@ -60,10 +60,29 @@ fn synthetic_rgba(width: u32, height: u32) -> RgbaImage {
 }
 
 /// PNG-encodes `img` with the same encoder and settings as
-/// `crop_decoded_to_png`; must stay in lockstep with `crop.rs`.
+/// `crop_decoded_to_png`; must stay in lockstep with `crop.rs`. Used only
+/// by the `encode_png` group, which measures the library's own encode call.
 fn encode_to_png(img: &RgbaImage) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(img.width() as usize * img.height() as usize);
     PngEncoder::new_with_quality(&mut bytes, CompressionType::Fast, FilterType::Adaptive)
+        .write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            ExtendedColorType::Rgba8,
+        )
+        .expect("PNG encode of a valid RGBA buffer");
+    bytes
+}
+
+/// PNG-encodes a decode/crop input fixture with pinned settings, independent
+/// of the library's own encode configuration. Fixture bytes must not change
+/// when the library's encoder settings do, or `decode` numbers stop being
+/// comparable across versions; `Default` compression also matches the
+/// densely-compressed files real sources are.
+fn encode_fixture_png(img: &RgbaImage) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    PngEncoder::new_with_quality(&mut bytes, CompressionType::Default, FilterType::Adaptive)
         .write_image(
             img.as_raw(),
             img.width(),
@@ -90,7 +109,7 @@ fn bench_decode(c: &mut Criterion) {
     for (w, h) in SOURCE_SIZES {
         // Encode once here, outside the measured loop — the bench measures
         // decode only, against bytes that already exist.
-        let png = encode_to_png(&synthetic_rgba(w, h));
+        let png = encode_fixture_png(&synthetic_rgba(w, h));
         group.bench_function(format!("{w}x{h}"), |b| {
             b.iter(|| DecodedSource::decode(black_box(&png)).expect("decode synthetic PNG"));
         });
@@ -115,8 +134,8 @@ fn bench_crop(c: &mut Criterion) {
     for (w, h) in sizes {
         // Decode once per source, outside the measured loop — this group
         // measures sampling + encode, not decode (that's `decode`'s job).
-        let decoded =
-            DecodedSource::decode(&encode_to_png(&synthetic_rgba(w, h))).expect("decode fixture");
+        let decoded = DecodedSource::decode(&encode_fixture_png(&synthetic_rgba(w, h)))
+            .expect("decode fixture");
         for rotation in [0.0_f32, 90.0, 37.0] {
             let view = ViewTransform {
                 offset: Point::ZERO,
