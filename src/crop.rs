@@ -117,6 +117,11 @@ pub enum CropError {
         /// The computed output height, in pixels, that exceeded the limit.
         height: u32,
     },
+    /// The requested output target cannot be satisfied: a
+    /// [`SizeTarget::Exact`] width or height of zero, a
+    /// [`SizeTarget::MaxDimension`] of zero, or a [`JpegOptions::quality`]
+    /// of zero or above 100.
+    InvalidOutputTarget,
     /// `source_bytes` could not be decoded as an image.
     Decode(Box<dyn std::error::Error + Send + Sync>),
     /// The sampled result could not be PNG-encoded.
@@ -141,6 +146,10 @@ impl std::fmt::Display for CropError {
                 f,
                 "computed output {width}x{height} exceeds the {MAX_OUTPUT_PIXELS}-pixel limit"
             ),
+            Self::InvalidOutputTarget => write!(
+                f,
+                "output target has a zero dimension or a JPEG quality outside 1-100"
+            ),
             Self::Decode(e) => write!(f, "could not decode source image: {e}"),
             Self::Encode(e) => write!(f, "could not encode cropped image: {e}"),
         }
@@ -156,7 +165,8 @@ impl std::error::Error for CropError {
             | Self::EmptyStencil
             | Self::EmptyViewport
             | Self::EmptyNatural
-            | Self::OutputTooLarge { .. } => None,
+            | Self::OutputTooLarge { .. }
+            | Self::InvalidOutputTarget => None,
         }
     }
 }
@@ -294,6 +304,23 @@ pub fn output_size(
     stencil: Stencil,
     zoom: f32,
 ) -> Result<(u32, u32), CropError> {
+    let (out_w, out_h) = native_output_size(natural, viewport, stencil, zoom)?;
+    check_output_area(out_w, out_h)?;
+    Ok((out_w, out_h))
+}
+
+/// Validates `natural`, `viewport`, `stencil` and `zoom` and computes the
+/// native output dimensions — `stencil / (fit_scale * zoom)`, rounded and
+/// clamped to at least 1 per axis. Shared by [`output_size`],
+/// [`output_size_with`] and [`crop_decoded`]. Does not apply the
+/// [`MAX_OUTPUT_PIXELS`] check — the caller checks the dimensions it will
+/// actually allocate for.
+fn native_output_size(
+    natural: Size,
+    viewport: Size,
+    stencil: Stencil,
+    zoom: f32,
+) -> Result<(u32, u32), CropError> {
     if !zoom.is_finite() {
         return Err(CropError::NonFiniteTransform);
     }
@@ -329,15 +356,177 @@ pub fn output_size(
     let out_w = ((stencil.width() / scale).round() as i64).clamp(1, u32::MAX as i64) as u32;
     let out_h = ((stencil.height() / scale).round() as i64).clamp(1, u32::MAX as i64) as u32;
 
+    Ok((out_w, out_h))
+}
+
+/// Rejects a `width`×`height` output whose area exceeds
+/// [`MAX_OUTPUT_PIXELS`], as [`CropError::OutputTooLarge`].
+fn check_output_area(width: u32, height: u32) -> Result<(), CropError> {
     // Computed as `u64` so the area itself cannot overflow while checking it
     // — `u32::MAX * u32::MAX` overflows `u32` but not `u64`.
-    if u64::from(out_w) * u64::from(out_h) > MAX_OUTPUT_PIXELS {
-        return Err(CropError::OutputTooLarge {
-            width: out_w,
-            height: out_h,
-        });
+    if u64::from(width) * u64::from(height) > MAX_OUTPUT_PIXELS {
+        return Err(CropError::OutputTooLarge { width, height });
     }
+    Ok(())
+}
 
+/// What [`crop_decoded`] produces: the output's pixel dimensions and its
+/// byte format. The default — [`SizeTarget::Native`] plus
+/// [`OutputFormat::Png`] — makes [`crop_decoded`] produce exactly the bytes
+/// [`crop_decoded_to_png`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CropOutput {
+    /// The output's pixel dimensions, relative to the native crop size.
+    pub size: SizeTarget,
+    /// The byte format `bytes` is delivered in.
+    pub format: OutputFormat,
+}
+
+/// The output's pixel dimensions, expressed relative to the native crop
+/// size — the `stencil / (fit_scale * zoom)` dimensions [`output_size`]
+/// computes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SizeTarget {
+    /// The native crop size, unchanged — identical dimensions (and, from
+    /// [`crop_decoded`], identical pixels) to [`crop_decoded_to_png`].
+    #[default]
+    Native,
+    /// Exactly `width`×`height` pixels, regardless of the native crop size.
+    /// The native aspect ratio is NOT preserved: a `width`/`height` ratio
+    /// that differs from the stencil's distorts the image, and avoiding
+    /// that is the caller's responsibility.
+    Exact {
+        /// The output width, in pixels. Must be non-zero.
+        width: u32,
+        /// The output height, in pixels. Must be non-zero.
+        height: u32,
+    },
+    /// The native crop size, downscaled (aspect-preserving) so its longer
+    /// side is at most this many pixels. A native crop already within the
+    /// cap is left at its native size — this target never upscales. Must be
+    /// non-zero.
+    MaxDimension(u32),
+}
+
+/// The byte format [`crop_decoded`] encodes the sampled pixels into.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    /// PNG, with the same encoder settings as [`crop_decoded_to_png`].
+    #[default]
+    Png,
+    /// JPEG. JPEG has no alpha channel, so pixels are composited onto
+    /// [`JpegOptions::background`] before encoding.
+    Jpeg(JpegOptions),
+    /// The raw RGBA8 pixel buffer, row-major, 4 bytes per pixel — no
+    /// encoding.
+    Rgba,
+}
+
+/// Settings for [`OutputFormat::Jpeg`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JpegOptions {
+    /// JPEG quality, `1..=100`. A value of zero or above 100 makes
+    /// [`crop_decoded`] return [`CropError::InvalidOutputTarget`].
+    pub quality: u8,
+    /// The opaque RGB colour transparent and semi-transparent pixels are
+    /// composited onto: `out = bg * (255 - a) / 255 + c * a / 255`, rounded
+    /// per channel.
+    pub background: [u8; 3],
+}
+
+/// Quality 80 on a black background.
+impl Default for JpegOptions {
+    fn default() -> Self {
+        Self {
+            quality: 80,
+            background: [0, 0, 0],
+        }
+    }
+}
+
+/// The byte format a [`CroppedOutput::bytes`] buffer actually holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CroppedFormat {
+    /// PNG-encoded bytes.
+    Png,
+    /// JPEG-encoded bytes.
+    Jpeg,
+    /// Raw RGBA8 bytes, row-major, 4 bytes per pixel.
+    Rgba,
+}
+
+/// The cropped image [`crop_decoded`] returns: the pixel dimensions of the
+/// output plus its bytes in the format the caller requested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CroppedOutput {
+    /// The output's width, in pixels.
+    pub width: u32,
+    /// The output's height, in pixels.
+    pub height: u32,
+    /// The format `bytes` holds.
+    pub format: CroppedFormat,
+    /// The output image, encoded per `format`.
+    pub bytes: Vec<u8>,
+}
+
+/// The pixel dimensions [`crop_decoded`] would produce for the given
+/// inputs and `target`, without decoding or sampling any pixels.
+/// `crop_decoded` computes its own output dimensions through the same
+/// code, so the two cannot drift. With [`SizeTarget::Native`] this returns
+/// exactly what [`output_size`] returns, including its errors.
+///
+/// # Errors
+///
+/// Returns every input-validation error [`output_size`] documents, for the
+/// same conditions; [`CropError::InvalidOutputTarget`] if `target` is
+/// [`SizeTarget::Exact`] with a zero width or height or
+/// [`SizeTarget::MaxDimension`]`(0)`; and [`CropError::OutputTooLarge`] if
+/// the FINAL dimensions — after `target` is applied — would exceed
+/// [`MAX_OUTPUT_PIXELS`]. Native dimensions above the limit are not an
+/// error when `target` shrinks the output below it.
+pub fn output_size_with(
+    natural: Size,
+    viewport: Size,
+    stencil: Stencil,
+    zoom: f32,
+    target: SizeTarget,
+) -> Result<(u32, u32), CropError> {
+    let (nat_w, nat_h) = native_output_size(natural, viewport, stencil, zoom)?;
+    apply_size_target(nat_w, nat_h, target)
+}
+
+/// Applies `target` to the native output dimensions and checks the FINAL
+/// dimensions against [`MAX_OUTPUT_PIXELS`].
+fn apply_size_target(nat_w: u32, nat_h: u32, target: SizeTarget) -> Result<(u32, u32), CropError> {
+    let (out_w, out_h) = match target {
+        SizeTarget::Native => (nat_w, nat_h),
+        SizeTarget::Exact { width, height } => {
+            if width == 0 || height == 0 {
+                return Err(CropError::InvalidOutputTarget);
+            }
+            (width, height)
+        }
+        SizeTarget::MaxDimension(cap) => {
+            if cap == 0 {
+                return Err(CropError::InvalidOutputTarget);
+            }
+            let longest = nat_w.max(nat_h);
+            if longest > cap {
+                // Aspect-preserving shrink of both axes by `cap / longest`;
+                // the longer side lands exactly on `cap`, the shorter one
+                // rounds, clamped to at least 1 pixel.
+                let factor = f64::from(cap) / f64::from(longest);
+                (
+                    (f64::from(nat_w) * factor).round().max(1.0) as u32,
+                    (f64::from(nat_h) * factor).round().max(1.0) as u32,
+                )
+            } else {
+                (nat_w, nat_h)
+            }
+        }
+    };
+    check_output_area(out_w, out_h)?;
     Ok((out_w, out_h))
 }
 
@@ -396,6 +585,135 @@ pub fn crop_decoded_to_png(
         height: out_h,
         png_bytes,
     })
+}
+
+/// Same crop as [`crop_decoded_to_png`], with the output's dimensions and
+/// byte format selected by `output`. With the default `output` —
+/// [`SizeTarget::Native`] plus [`OutputFormat::Png`] — the result's bytes
+/// are identical to [`crop_decoded_to_png`]'s `png_bytes`.
+///
+/// When the final dimensions equal the native crop size (including
+/// [`SizeTarget::Native`] and a [`SizeTarget::MaxDimension`] cap the native
+/// size already satisfies), pixels are sampled exactly as
+/// [`crop_decoded_to_png`] samples them. A downscaling target is resampled
+/// by area averaging (exact at zero rotation, supersampled box average
+/// otherwise); an upscaling [`SizeTarget::Exact`] axis is resampled
+/// bilinearly. All averaging runs in premultiplied-alpha space, so
+/// transparent out-of-source samples do not darken edges.
+///
+/// `stencil`'s shape is not applied, exactly as on [`crop_decoded_to_png`]:
+/// a circle stencil yields its square bounding box, unmasked. `viewport`
+/// carries the same must-match-the-component requirement documented on
+/// [`crop_to_png`].
+///
+/// # Errors
+///
+/// Returns the same errors as [`crop_decoded_to_png`] for the same view and
+/// framing conditions, with two differences:
+/// [`CropError::InvalidOutputTarget`] if `output.size` is
+/// [`SizeTarget::Exact`] with a zero width or height or
+/// [`SizeTarget::MaxDimension`]`(0)`, or if `output.format` is
+/// [`OutputFormat::Jpeg`] with a quality of zero or above 100; and
+/// [`CropError::OutputTooLarge`] applies to the FINAL dimensions after
+/// `output.size` (see [`output_size_with`]). [`CropError::Encode`] is
+/// returned if PNG or JPEG encoding fails; [`OutputFormat::Rgba`] performs
+/// no encoding.
+pub fn crop_decoded(
+    decoded: &DecodedSource,
+    view: ViewTransform,
+    stencil: Stencil,
+    viewport: Size,
+    output: CropOutput,
+) -> Result<CroppedOutput, CropError> {
+    let ViewTransform {
+        offset,
+        zoom,
+        rotation,
+    } = view;
+
+    if !offset.x.is_finite() || !offset.y.is_finite() || !zoom.is_finite() || !rotation.is_finite()
+    {
+        return Err(CropError::NonFiniteTransform);
+    }
+    let natural = decoded.natural_size();
+    let (nat_w, nat_h) = native_output_size(natural, viewport, stencil, zoom)?;
+    let (out_w, out_h) = apply_size_target(nat_w, nat_h, output.size)?;
+
+    if let OutputFormat::Jpeg(opts) = output.format {
+        if opts.quality == 0 || opts.quality > 100 {
+            return Err(CropError::InvalidOutputTarget);
+        }
+    }
+
+    let source = decoded.0.as_ref();
+    // f64 for the same precision reasons documented in `crop_decoded_to_png`.
+    let fit_scale = contain_scale(natural, viewport);
+    let scale = f64::from(fit_scale) * f64::from(zoom);
+
+    let pixels = if (out_w, out_h) == (nat_w, nat_h) {
+        // Final dimensions equal the native crop: the exact sampling path
+        // `crop_decoded_to_png` uses, byte-identical pixels.
+        rasterize(source, out_w, out_h, scale, offset, rotation)
+    } else {
+        resample(
+            source,
+            &Resample {
+                nat_w,
+                nat_h,
+                out_w,
+                out_h,
+                scale,
+                offset,
+                rotation,
+            },
+        )
+    };
+
+    let (format, bytes) = encode_pixels(pixels, out_w, out_h, output.format)?;
+    Ok(CroppedOutput {
+        width: out_w,
+        height: out_h,
+        format,
+        bytes,
+    })
+}
+
+/// Encodes the raw RGBA8 buffer `pixels` into `format`'s byte format and
+/// reports what the returned bytes hold.
+fn encode_pixels(
+    pixels: Vec<u8>,
+    out_w: u32,
+    out_h: u32,
+    format: OutputFormat,
+) -> Result<(CroppedFormat, Vec<u8>), CropError> {
+    match format {
+        OutputFormat::Png => {
+            // The same encoder call and settings as `crop_decoded_to_png`.
+            let mut bytes = Vec::with_capacity(out_w as usize * out_h as usize);
+            PngEncoder::new_with_quality(&mut bytes, CompressionType::Fast, FilterType::Adaptive)
+                .write_image(&pixels, out_w, out_h, ExtendedColorType::Rgba8)
+                .map_err(|e| CropError::Encode(Box::new(e)))?;
+            Ok((CroppedFormat::Png, bytes))
+        }
+        OutputFormat::Jpeg(opts) => {
+            // Composite onto the opaque background:
+            // `out = bg * (255 - a) / 255 + c * a / 255`, rounded.
+            let mut rgb = Vec::with_capacity(out_w as usize * out_h as usize * 3);
+            for px in pixels.chunks_exact(4) {
+                let a = u32::from(px[3]);
+                for (&c, &bg) in px[..3].iter().zip(&opts.background) {
+                    let blended = u32::from(bg) * (255 - a) + u32::from(c) * a;
+                    rgb.push((f64::from(blended) / 255.0).round() as u8);
+                }
+            }
+            let mut bytes = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, opts.quality)
+                .write_image(&rgb, out_w, out_h, ExtendedColorType::Rgb8)
+                .map_err(|e| CropError::Encode(Box::new(e)))?;
+            Ok((CroppedFormat::Jpeg, bytes))
+        }
+        OutputFormat::Rgba => Ok((CroppedFormat::Rgba, pixels)),
+    }
 }
 
 /// Samples every pixel of the `out_w`×`out_h` crop from `source` and
@@ -579,6 +897,228 @@ fn raster_general(
         }
         row_sx -= sin_inv;
         row_sy += cos_inv;
+    }
+}
+
+/// The parameters of a resampled crop: the native crop's dimensions
+/// (`nat_w`×`nat_h`, what [`rasterize`] would produce), the requested final
+/// dimensions (`out_w`×`out_h`), and the native crop's affine mapping into
+/// the source (`scale`, `offset`, `rotation` — the same values [`rasterize`]
+/// takes).
+struct Resample {
+    /// The native crop width, in pixels.
+    nat_w: u32,
+    /// The native crop height, in pixels.
+    nat_h: u32,
+    /// The final output width, in pixels.
+    out_w: u32,
+    /// The final output height, in pixels.
+    out_h: u32,
+    /// The combined source-to-screen scale, `fit_scale * zoom`.
+    scale: f64,
+    /// The view's offset, in screen pixels.
+    offset: Point,
+    /// The view's rotation, in degrees.
+    rotation: f32,
+}
+
+/// Samples the `r.out_w`×`r.out_h` output by resampling the native crop
+/// (never materialised) and returns raw RGBA bytes, row-major. Only called
+/// when the final dimensions differ from the native ones; equal dimensions
+/// go through [`rasterize`].
+///
+/// Dispatch: a pure downscale of at most [`MAX_RESAMPLE_RATIO`] per axis
+/// whose view [`translation_offsets`] proves to be an integer translation
+/// (including its half-integer tie bail-out, at the native mapping) takes
+/// [`resample_area`] — an exact area average, whose cost grows with the
+/// native area and is bounded by the ratio limit. Every other case takes
+/// [`resample_supersample`] — a box average over a subsample grid, with
+/// bilinear per-subsample reads whenever an axis upscales (`kx`/`ky`
+/// resolve to 1 on such an axis) and nearest-neighbour reads otherwise,
+/// whose cost is bounded by the output area times the grid clamp.
+fn resample(source: &RgbaImage, r: &Resample) -> Vec<u8> {
+    let upscales = r.out_w > r.nat_w || r.out_h > r.nat_h;
+    let rx = f64::from(r.nat_w) / f64::from(r.out_w);
+    let ry = f64::from(r.nat_h) / f64::from(r.out_h);
+    if !upscales && rx <= MAX_RESAMPLE_RATIO && ry <= MAX_RESAMPLE_RATIO {
+        if let Some((tx, ty)) =
+            translation_offsets(source, r.nat_w, r.nat_h, r.scale, r.offset, r.rotation)
+        {
+            return resample_area(source, r, tx, ty);
+        }
+    }
+    resample_supersample(source, r, upscales)
+}
+
+/// The largest per-axis native-to-output ratio [`resample_area`] handles and
+/// the per-axis subsample-grid clamp of [`resample_supersample`]. Caps the
+/// per-output-pixel work of both resampling paths.
+const MAX_RESAMPLE_RATIO: f64 = 16.0;
+
+/// Exact area average for an unrotated, integer-translated downscale.
+/// Output pixel `(ox, oy)` covers the native-crop rectangle
+/// `[ox*rx, (ox+1)*rx) x [oy*ry, (oy+1)*ry)` with `rx = nat_w / out_w` and
+/// `ry = nat_h / out_h` (f64); native-crop pixel `(nx, ny)` is source pixel
+/// `(nx + tx, ny + ty)`, or transparent when that lies outside the source.
+/// Edge rows/columns are weighted by fractional coverage. Averaging runs in
+/// premultiplied-alpha space: out-of-source cells contribute nothing to the
+/// accumulators but their weight stays in the total, so they dilute alpha
+/// without darkening colour.
+fn resample_area(source: &RgbaImage, r: &Resample, tx: i64, ty: i64) -> Vec<u8> {
+    let rx = f64::from(r.nat_w) / f64::from(r.out_w);
+    let ry = f64::from(r.nat_h) / f64::from(r.out_h);
+    let src_w = i64::from(source.width());
+    let src_h = i64::from(source.height());
+    let src_raw: &[u8] = source.as_raw();
+    let src_row_len = source.width() as usize * 4;
+
+    let mut pixels = vec![0u8; r.out_w as usize * r.out_h as usize * 4];
+    for oy in 0..r.out_h {
+        let y0 = f64::from(oy) * ry;
+        let y1 = f64::from(oy + 1) * ry;
+        for ox in 0..r.out_w {
+            let x0 = f64::from(ox) * rx;
+            let x1 = f64::from(ox + 1) * rx;
+            let mut acc = [0.0f64; 4];
+            for ny in (y0.floor() as i64)..(y1.ceil() as i64) {
+                let wy = y1.min((ny + 1) as f64) - y0.max(ny as f64);
+                if wy <= 0.0 {
+                    continue;
+                }
+                // Saturating: `ty` came through a saturating float-to-int
+                // cast and may sit at `i64`'s limits; any such translation
+                // is out of bounds, which the check below preserves.
+                let sy = ny.saturating_add(ty);
+                for nx in (x0.floor() as i64)..(x1.ceil() as i64) {
+                    let wx = x1.min((nx + 1) as f64) - x0.max(nx as f64);
+                    if wx <= 0.0 {
+                        continue;
+                    }
+                    let sx = nx.saturating_add(tx);
+                    if sx >= 0 && sy >= 0 && sx < src_w && sy < src_h {
+                        let at = sy as usize * src_row_len + sx as usize * 4;
+                        accumulate(&mut acc, &src_raw[at..at + 4], wx * wy);
+                    }
+                }
+            }
+            let at = (oy as usize * r.out_w as usize + ox as usize) * 4;
+            resolve(&acc, (x1 - x0) * (y1 - y0), &mut pixels[at..at + 4]);
+        }
+    }
+    pixels
+}
+
+/// Supersampled box average through the affine inverse, for rotated
+/// downscales, translation ties, upscales, and mixed-axis targets. Each
+/// output pixel averages a `kx`×`ky` grid of subsample points — the centres
+/// of equal subcells of the pixel's native-crop footprint — with
+/// `kx = ceil(rx)` and `ky = ceil(ry)`, each clamped to `1..=16` (an
+/// upscaling or equal axis resolves to 1). Each subsample point, shifted by
+/// `-0.5` into the pixel-centres-at-integers convention [`raster_general`]
+/// samples in, is mapped through the same f64 affine inverse and read
+/// nearest-neighbour, or bilinearly when `bilinear` is set. Averaging runs
+/// in premultiplied-alpha space; out-of-source subsamples stay transparent.
+fn resample_supersample(source: &RgbaImage, r: &Resample, bilinear: bool) -> Vec<u8> {
+    let rx = f64::from(r.nat_w) / f64::from(r.out_w);
+    let ry = f64::from(r.nat_h) / f64::from(r.out_h);
+    let kx = (rx.ceil() as u32).clamp(1, MAX_RESAMPLE_RATIO as u32);
+    let ky = (ry.ceil() as u32).clamp(1, MAX_RESAMPLE_RATIO as u32);
+    let total_weight = f64::from(kx * ky);
+
+    let rotation_rad = f64::from(r.rotation).to_radians();
+    // The INVERSE rotation, exactly as `raster_general` samples with.
+    let (sin_inv, cos_inv) = (-rotation_rad).sin_cos();
+    let half_nat_w = f64::from(r.nat_w) / 2.0;
+    let half_nat_h = f64::from(r.nat_h) / 2.0;
+    let half_src_w = f64::from(source.width()) / 2.0;
+    let half_src_h = f64::from(source.height()) / 2.0;
+
+    let mut pixels = vec![0u8; r.out_w as usize * r.out_h as usize * 4];
+    for oy in 0..r.out_h {
+        for ox in 0..r.out_w {
+            let mut acc = [0.0f64; 4];
+            for j in 0..ky {
+                let y = (f64::from(oy) + (f64::from(j) + 0.5) / f64::from(ky)) * ry - 0.5;
+                let dy = (y - half_nat_h) * r.scale - f64::from(r.offset.y);
+                for i in 0..kx {
+                    let x = (f64::from(ox) + (f64::from(i) + 0.5) / f64::from(kx)) * rx - 0.5;
+                    let dx = (x - half_nat_w) * r.scale - f64::from(r.offset.x);
+                    let sx = (dx * cos_inv - dy * sin_inv) / r.scale + half_src_w;
+                    let sy = (dx * sin_inv + dy * cos_inv) / r.scale + half_src_h;
+                    if bilinear {
+                        bilinear_sample(source, sx, sy, &mut acc);
+                    } else {
+                        nearest_sample(source, sx, sy, &mut acc);
+                    }
+                }
+            }
+            let at = (oy as usize * r.out_w as usize + ox as usize) * 4;
+            resolve(&acc, total_weight, &mut pixels[at..at + 4]);
+        }
+    }
+    pixels
+}
+
+/// Adds source pixel `(sx, sy)`, rounded nearest-neighbour with the same
+/// bounds semantics as [`raster_general`], to `acc` with weight 1. An
+/// out-of-source coordinate adds nothing — a transparent sample.
+fn nearest_sample(source: &RgbaImage, sx: f64, sy: f64, acc: &mut [f64; 4]) {
+    let ix = sx.round();
+    let iy = sy.round();
+    if ix >= 0.0 && iy >= 0.0 {
+        let (ix, iy) = (ix as u32, iy as u32);
+        if ix < source.width() && iy < source.height() {
+            let at = (iy as usize * source.width() as usize + ix as usize) * 4;
+            accumulate(acc, &source.as_raw()[at..at + 4], 1.0);
+        }
+    }
+}
+
+/// Adds the bilinear blend of the 4 source pixels around fractional
+/// coordinate `(sx, sy)` to `acc`, with weights summing to 1. Neighbours
+/// outside the source are transparent: they keep their weight but add
+/// nothing to the accumulators.
+fn bilinear_sample(source: &RgbaImage, sx: f64, sy: f64, acc: &mut [f64; 4]) {
+    let x0 = sx.floor();
+    let y0 = sy.floor();
+    let fx = sx - x0;
+    let fy = sy - y0;
+    let src_w = f64::from(source.width());
+    let src_h = f64::from(source.height());
+    for (px, py, w) in [
+        (x0, y0, (1.0 - fx) * (1.0 - fy)),
+        (x0 + 1.0, y0, fx * (1.0 - fy)),
+        (x0, y0 + 1.0, (1.0 - fx) * fy),
+        (x0 + 1.0, y0 + 1.0, fx * fy),
+    ] {
+        if w > 0.0 && px >= 0.0 && py >= 0.0 && px < src_w && py < src_h {
+            let at = (py as usize * source.width() as usize + px as usize) * 4;
+            accumulate(acc, &source.as_raw()[at..at + 4], w);
+        }
+    }
+}
+
+/// Adds one RGBA source pixel to the premultiplied accumulators with weight
+/// `w`: `w * channel * alpha` into the three colour slots, `w * alpha` into
+/// the alpha slot.
+fn accumulate(acc: &mut [f64; 4], px: &[u8], w: f64) {
+    let a = f64::from(px[3]);
+    acc[0] += w * f64::from(px[0]) * a;
+    acc[1] += w * f64::from(px[1]) * a;
+    acc[2] += w * f64::from(px[2]) * a;
+    acc[3] += w * a;
+}
+
+/// Resolves premultiplied accumulators into one straight-alpha RGBA output
+/// pixel: alpha is the alpha accumulator over `total_weight`; each colour is
+/// its accumulator over the alpha accumulator when that is non-zero. A fully
+/// transparent result leaves `out`'s zeroed colour bytes untouched.
+fn resolve(acc: &[f64; 4], total_weight: f64, out: &mut [u8]) {
+    out[3] = (acc[3] / total_weight).round() as u8;
+    if acc[3] > 0.0 {
+        out[0] = (acc[0] / acc[3]).round() as u8;
+        out[1] = (acc[1] / acc[3]).round() as u8;
+        out[2] = (acc[2] / acc[3]).round() as u8;
     }
 }
 
