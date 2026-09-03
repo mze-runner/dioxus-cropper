@@ -699,7 +699,7 @@ fn encode_pixels(
             // Composite onto the opaque background:
             // `out = bg * (255 - a) / 255 + c * a / 255`, rounded.
             let mut rgb = Vec::with_capacity(out_w as usize * out_h as usize * 3);
-            for px in pixels.chunks_exact(4) {
+            for px in pixels.as_chunks::<4>().0 {
                 let a = u32::from(px[3]);
                 for (&c, &bg) in px[..3].iter().zip(&opts.background) {
                     let blended = u32::from(bg) * (255 - a) + u32::from(c) * a;
@@ -868,7 +868,7 @@ fn raster_general(
 
     for row in pixels.chunks_exact_mut(out_w as usize * 4) {
         let (mut sx, mut sy) = (row_sx, row_sy);
-        for px in row.chunks_exact_mut(4) {
+        for px in row.as_chunks_mut::<4>().0 {
             // Nearest-neighbour bounds semantics, preserved exactly:
             // - `.round()` breaks ties away from zero;
             // - a coordinate rounding to `-0.0` (from e.g. `-0.3`) passes
