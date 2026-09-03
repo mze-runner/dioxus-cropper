@@ -10,16 +10,19 @@ use crate::icons::IconDownload;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct ResultStripProps {
-    /// Object URL over the crop's PNG bytes — the thumbnail's `src` and
-    /// the download link's `href`. The caller owns its revocation.
+    /// Object URL over the crop's encoded bytes — the thumbnail's `src`
+    /// and the download link's `href`. The caller owns its revocation.
     pub url: Arc<str>,
     pub width: u32,
     pub height: u32,
     pub format: String,
     pub size_label: String,
-    /// The stencil shape the crop was taken with. `crop_decoded_to_png`
-    /// returns a circle's unmasked square bounding box, for the caller to
-    /// round with CSS at display time — this is that rounding.
+    /// The filename the download link saves as — extension matching
+    /// `format`.
+    pub download_name: String,
+    /// The stencil shape the crop was taken with. `crop_decoded` returns a
+    /// circle's unmasked square bounding box, for the caller to round with
+    /// CSS at display time — this is that rounding.
     pub shape: StencilShape,
 }
 
@@ -51,7 +54,7 @@ pub fn ResultStrip(props: ResultStripProps) -> Element {
                 class: "cr-ctrl",
                 style: "width: auto; padding: 0 12px; text-decoration: none;",
                 href: "{props.url}",
-                "download": "cropped-image.png",
+                "download": "{props.download_name}",
                 IconDownload { size: 15 }
                 "Download"
             }

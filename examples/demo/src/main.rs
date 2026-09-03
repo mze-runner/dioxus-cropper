@@ -19,15 +19,16 @@ use dioxus_cropper::geometry::{
     ViewTransform,
 };
 use dioxus_cropper::{
-    crop_decoded_to_png, output_size, CropError, DecodedSource, PanDirection, MAX_OUTPUT_PIXELS,
+    crop_decoded, output_size_with, CropError, CropOutput, CroppedFormat, DecodedSource,
+    PanDirection, MAX_OUTPUT_PIXELS,
 };
 
 use components::{
-    PositionGroup, ResultStrip, RotateGroup, ShapeGroup, SourceGroup, Stage, StageReadout,
-    StageSource, TimingReadout, TuningGroup, ZoomGroup,
+    OutputGroup, PositionGroup, ResultStrip, RotateGroup, ShapeGroup, SourceGroup, Stage,
+    StageReadout, StageSource, TimingReadout, TuningGroup, ZoomGroup,
 };
 use icons::IconCrop;
-use types::{CursorChoice, ShapeKind, ViewportPreset};
+use types::{CursorChoice, FormatChoice, ShapeKind, SizeChoice, ViewportPreset};
 
 const DEMO_CSS: Asset = asset!("/assets/demo.css");
 
@@ -81,11 +82,14 @@ struct LoadedImage {
 
 #[derive(Clone)]
 struct CroppedResult {
-    /// Object URL over the crop's PNG bytes. Revoked when the next crop
-    /// replaces it or the next pick clears it.
+    /// Object URL over the crop's encoded bytes. Revoked when the next
+    /// crop replaces it or the next pick clears it.
     url: Arc<str>,
     width: u32,
     height: u32,
+    /// The byte format the URL's blob holds — drives the result strip's
+    /// MIME type, format label and download filename.
+    format: CroppedFormat,
     size_bytes: usize,
 }
 
@@ -175,6 +179,36 @@ fn format_size(bytes: usize) -> String {
         format!("{bytes} B")
     } else {
         format!("{:.1} KB", bytes as f64 / 1024.0)
+    }
+}
+
+/// The MIME type of the result blob for `format`. The demo only requests
+/// PNG or JPEG; `Rgba` bytes carry no image container, hence the generic
+/// type.
+fn format_mime(format: CroppedFormat) -> &'static str {
+    match format {
+        CroppedFormat::Png => "image/png",
+        CroppedFormat::Jpeg => "image/jpeg",
+        CroppedFormat::Rgba => "application/octet-stream",
+    }
+}
+
+/// The result strip's format label for `format`.
+fn format_label(format: CroppedFormat) -> &'static str {
+    match format {
+        CroppedFormat::Png => "PNG",
+        CroppedFormat::Jpeg => "JPEG",
+        CroppedFormat::Rgba => "RGBA",
+    }
+}
+
+/// The download filename for `format` — extension matching the blob's
+/// byte format.
+fn download_name(format: CroppedFormat) -> &'static str {
+    match format {
+        CroppedFormat::Png => "cropped-image.png",
+        CroppedFormat::Jpeg => "cropped-image.jpg",
+        CroppedFormat::Rgba => "cropped-image.bin",
     }
 }
 
@@ -275,18 +309,26 @@ fn apply_view_edit(
     view.set(vw);
 }
 
+/// The signals `do_crop_now` writes its outcome into: the published
+/// result, the error readout, and the stage timings.
+#[derive(Clone, Copy)]
+struct CropSinks {
+    cropped: Signal<Option<CroppedResult>>,
+    error: Signal<Option<String>>,
+    timings: Signal<StageTimings>,
+}
+
 /// Runs the deferred pixel decode (first press only — cached thereafter)
 /// and the crop, then publishes the result under a fresh object URL. Stage
-/// wall times land in `timings` on success, joining the pick-time entries
-/// already there.
+/// wall times land in `sinks.timings` on success, joining the pick-time
+/// entries already there.
 fn do_crop_now(
     loaded: LoadedImage,
     view: ViewTransform,
     stencil: Stencil,
     viewport: Size,
-    mut cropped: Signal<Option<CroppedResult>>,
-    mut error: Signal<Option<String>>,
-    mut timings: Signal<StageTimings>,
+    output: CropOutput,
+    mut sinks: CropSinks,
 ) {
     // The one-and-only decode of the picked file, deferred from pick time
     // to here. A failure is NOT cached — the `OnceLock` stays empty, so
@@ -307,7 +349,7 @@ fn do_crop_now(
                     loaded.decoded.get_or_init(|| fresh)
                 }
                 Err(e) => {
-                    error.set(Some(format!("crop failed: {e}")));
+                    sinks.error.set(Some(format!("crop failed: {e}")));
                     return;
                 }
             }
@@ -315,15 +357,17 @@ fn do_crop_now(
     };
 
     let started = js_sys::Date::now();
-    match crop_decoded_to_png(decoded, view, stencil, viewport) {
+    match crop_decoded(decoded, view, stencil, viewport, output) {
         Ok(result) => {
             let crop_ms = js_sys::Date::now() - started;
 
             let started = js_sys::Date::now();
-            let url = match object_url::create(&result.png_bytes, "image/png") {
+            let url = match object_url::create(&result.bytes, format_mime(result.format)) {
                 Ok(url) => url,
                 Err(e) => {
-                    error.set(Some(format!("could not create a URL for the result: {e}")));
+                    sinks
+                        .error
+                        .set(Some(format!("could not create a URL for the result: {e}")));
                     return;
                 }
             };
@@ -333,27 +377,28 @@ fn do_crop_now(
             // old URL in the same pass that adopts the new one, and a blob
             // URL's revocation only blocks NEW fetches — the old thumbnail
             // stays painted for the instant it remains on screen.
-            if let Some(previous) = cropped.peek().as_ref() {
+            if let Some(previous) = sinks.cropped.peek().as_ref() {
                 object_url::revoke(&previous.url);
             }
-            cropped.set(Some(CroppedResult {
+            sinks.cropped.set(Some(CroppedResult {
                 url,
                 width: result.width,
                 height: result.height,
-                size_bytes: result.png_bytes.len(),
+                format: result.format,
+                size_bytes: result.bytes.len(),
             }));
-            error.set(None);
+            sinks.error.set(None);
 
             // Extends the pick-time read/probe entries rather than
             // replacing them — one line tells the whole story of the
             // current image.
-            let mut t = *timings.peek();
+            let mut t = *sinks.timings.peek();
             t.decode = Some(decode);
             t.crop_ms = Some(crop_ms);
             t.url_ms = Some(url_ms);
-            timings.set(t);
+            sinks.timings.set(t);
         }
-        Err(e) => error.set(Some(format!("crop failed: {e}"))),
+        Err(e) => sinks.error.set(Some(format!("crop failed: {e}"))),
     }
 }
 
@@ -375,6 +420,8 @@ fn App() -> Element {
     let mut cursor = use_signal(CursorChoice::default);
     let mut pan_direction = use_signal(PanDirection::default);
     let mut restrict = use_signal(|| true);
+    let mut size_choice = use_signal(SizeChoice::default);
+    let mut format_choice = use_signal(FormatChoice::default);
 
     let vp_size = use_memo(move || viewport_preset().size());
     let stencil = use_memo(move || shape().stencil());
@@ -558,13 +605,22 @@ fn App() -> Element {
         let vp = vp_size();
         let st = stencil();
         let vw = view();
+        let output = CropOutput {
+            size: size_choice.peek().target(),
+            format: format_choice.peek().format(),
+        };
         spawn(async move {
             busy.set(Busy::Cropping);
             // Yields so a render lands with the button disabled and
             // relabelled before the synchronous decode (first press only) +
-            // resample + PNG-encode work below runs and blocks the thread.
+            // resample + encode work below runs and blocks the thread.
             paint::wait_for_paint().await;
-            do_crop_now(loaded, vw, st, vp, cropped, error, timings);
+            let sinks = CropSinks {
+                cropped,
+                error,
+                timings,
+            };
+            do_crop_now(loaded, vw, st, vp, output, sinks);
             busy.set(Busy::Idle);
         });
     };
@@ -587,13 +643,17 @@ fn App() -> Element {
     });
     // Computed on every render so the state is visible before the "Crop"
     // press rather than surfacing as an error after it — the library itself
-    // rejects a predicted output over `MAX_OUTPUT_PIXELS`.
+    // rejects a predicted output over `MAX_OUTPUT_PIXELS`. The prediction
+    // applies the selected size target, so the dims and the limit check
+    // match what `crop_decoded` will produce: a target that shrinks the
+    // output below the limit does not block on the native size.
     let output_check = loaded.as_ref().map(|loaded_image| {
-        output_size(
+        output_size_with(
             loaded_image.natural_size,
             current_viewport_size,
             current_stencil,
             current_view.zoom,
+            size_choice().target(),
         )
     });
     let output_dims = match &output_check {
@@ -679,8 +739,9 @@ fn App() -> Element {
                             url: result.url,
                             width: result.width,
                             height: result.height,
-                            format: "PNG".to_string(),
+                            format: format_label(result.format).to_string(),
                             size_label: format_size(result.size_bytes),
+                            download_name: download_name(result.format).to_string(),
                             shape: current_stencil.shape(),
                         }
                     }
@@ -714,6 +775,12 @@ fn App() -> Element {
                                 fix_view_for_config.call(());
                             },
                             on_reset: reset_view,
+                        }
+                        OutputGroup {
+                            size: size_choice(),
+                            on_size: move |s| size_choice.set(s),
+                            format: format_choice(),
+                            on_format: move |f| format_choice.set(f),
                         }
                         TuningGroup {
                             viewport: current_viewport,

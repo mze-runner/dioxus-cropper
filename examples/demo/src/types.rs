@@ -2,7 +2,7 @@
 //! config types before it reaches `Cropper`.
 
 use dioxus_cropper::geometry::{Size, Stencil};
-use dioxus_cropper::CropperCursor;
+use dioxus_cropper::{CropperCursor, JpegOptions, OutputFormat, SizeTarget};
 
 /// Which of the crate's three stencil shapes the demo currently frames
 /// with. Sizes are the demo's own arbitrary values, not something the
@@ -104,4 +104,64 @@ impl CursorChoice {
         Self::Crosshair,
         Self::None,
     ];
+}
+
+/// The output-size targets surfaced on the rail. Fixed values — the demo
+/// has no numeric inputs for a custom cap or exact size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SizeChoice {
+    #[default]
+    AsIs,
+    Max1600,
+    Exact512,
+}
+
+impl SizeChoice {
+    pub fn target(self) -> SizeTarget {
+        match self {
+            Self::AsIs => SizeTarget::Native,
+            Self::Max1600 => SizeTarget::MaxDimension(1600),
+            Self::Exact512 => SizeTarget::Exact {
+                width: 512,
+                height: 512,
+            },
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AsIs => "As is",
+            Self::Max1600 => "Max 1600",
+            Self::Exact512 => "512\u{d7}512",
+        }
+    }
+
+    pub const ALL: [Self; 3] = [Self::AsIs, Self::Max1600, Self::Exact512];
+}
+
+/// The output byte formats surfaced on the rail. Excludes
+/// `OutputFormat::Rgba` — the demo displays and downloads encoded images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FormatChoice {
+    #[default]
+    Png,
+    Jpeg,
+}
+
+impl FormatChoice {
+    pub fn format(self) -> OutputFormat {
+        match self {
+            Self::Png => OutputFormat::Png,
+            Self::Jpeg => OutputFormat::Jpeg(JpegOptions::default()),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+        }
+    }
+
+    pub const ALL: [Self; 2] = [Self::Png, Self::Jpeg];
 }
