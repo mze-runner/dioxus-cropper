@@ -6,6 +6,8 @@
 
 A headless image cropper component for Dioxus.
 
+**[Live demo](https://mze-runner.github.io/dioxus-cropper/)** — pan, zoom, rotate and crop an image of your own, with every configurable prop on a control rail.
+
 ## Headless
 
 `Cropper` renders a positioned, clipped image and a stencil overlay; it owns no view state and ships no CSS, no icons, and no strings. The host owns pan/zoom/rotation state, supplies every control (zoom slider, rotate button, confirm button), and styles the result with its own classes.
