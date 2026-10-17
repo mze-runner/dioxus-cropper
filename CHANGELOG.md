@@ -4,6 +4,37 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.0.4]
+
+### Breaking
+
+- `DecodedSource::decode` (and so `crop_to_png`) applies the source's EXIF
+  orientation. For orientations 2–8 the decoded pixels, `natural_size` and
+  crop output change to match what a browser renders.
+  `DecodedSource::decode_with` with
+  `DecodeOptions::default().with_orientation(false)` restores the previous
+  behaviour.
+- `CropError` has a `Background` variant.
+
+### Added
+
+- `crop_async`, one non-blocking crop call for web and desktop hosts. On
+  wasm32 the browser decodes (`createImageBitmap`), resamples (2D canvas)
+  and encodes (`toBlob`), with no decoded copy of the source in WASM
+  memory; on native targets decode and `crop_decoded` run on a background
+  thread, awaited without any particular async runtime.
+- `crop_in_browser` and `crop_blob_in_browser` (wasm32 only), the browser
+  path of `crop_async`, the latter taking a `Blob` directly.
+- `DecodeOptions`, controlling EXIF orientation, and
+  `DecodedSource::decode_with`.
+- `natural_size` and `natural_size_with`: the oriented natural size from
+  the header alone, for `Cropper`'s `natural_size` prop.
+
+### Fixed
+
+- Crops of EXIF-rotated photos (orientation 5–8) no longer come out rotated
+  or mirrored relative to the stage.
+
 ## [0.0.3]
 
 ### Added

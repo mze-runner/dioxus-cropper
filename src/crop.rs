@@ -65,8 +65,16 @@
 
 use crate::geometry::{contain_scale, normalize_rotation, Point, Size, Stencil, ViewTransform};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
-use image::{ExtendedColorType, ImageEncoder, RgbaImage};
+use image::metadata::Orientation;
+use image::{DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, RgbaImage};
 use std::sync::Arc;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod blocking;
+#[cfg(target_arch = "wasm32")]
+mod browser;
+#[cfg(target_arch = "wasm32")]
+pub use browser::{crop_blob_in_browser, crop_in_browser};
 
 /// The cropped image: PNG-encoded bytes plus the pixel dimensions the
 /// caller needs to display or sanity-check the result. Fields are the
@@ -126,6 +134,9 @@ pub enum CropError {
     Decode(Box<dyn std::error::Error + Send + Sync>),
     /// The sampled result could not be PNG-encoded.
     Encode(Box<dyn std::error::Error + Send + Sync>),
+    /// [`crop_async`]'s background thread could not be started, or ended
+    /// without producing a result.
+    Background(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl std::fmt::Display for CropError {
@@ -152,6 +163,7 @@ impl std::fmt::Display for CropError {
             ),
             Self::Decode(e) => write!(f, "could not decode source image: {e}"),
             Self::Encode(e) => write!(f, "could not encode cropped image: {e}"),
+            Self::Background(e) => write!(f, "background crop failed: {e}"),
         }
     }
 }
@@ -159,7 +171,7 @@ impl std::fmt::Display for CropError {
 impl std::error::Error for CropError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Decode(e) | Self::Encode(e) => Some(e.as_ref()),
+            Self::Decode(e) | Self::Encode(e) | Self::Background(e) => Some(e.as_ref()),
             Self::NonFiniteTransform
             | Self::InvalidZoom
             | Self::EmptyStencil
@@ -233,9 +245,96 @@ pub struct DecodedSource(Arc<RgbaImage>);
 /// their predicted allocation squeaks under the byte cap.
 const MAX_SOURCE_DIMENSION: u32 = 16_384;
 
+/// How a source image is decoded. The default applies EXIF orientation.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeOptions {
+    /// Applies the source's EXIF orientation, so pixels and natural size
+    /// match what a browser renders for the same file (`<img>` applies it
+    /// by default). With `false`, the stored pixel buffer is used as-is;
+    /// the host must then render the stage with CSS
+    /// `image-orientation: none` for the crop to match it.
+    pub apply_orientation: bool,
+}
+
+impl DecodeOptions {
+    /// These options with [`Self::apply_orientation`] set to `apply`.
+    pub fn with_orientation(mut self, apply: bool) -> Self {
+        self.apply_orientation = apply;
+        self
+    }
+}
+
+/// Applies EXIF orientation.
+impl Default for DecodeOptions {
+    fn default() -> Self {
+        Self {
+            apply_orientation: true,
+        }
+    }
+}
+
+/// The natural size of `source_bytes` with the default [`DecodeOptions`]:
+/// the pixel dimensions after EXIF orientation, read from the header
+/// without decoding pixels. Pass this as [`Cropper`](crate::Cropper)'s
+/// `natural_size`.
+///
+/// # Errors
+///
+/// Returns [`CropError::Decode`] if the format is unrecognised or the
+/// header cannot be read.
+pub fn natural_size(source_bytes: &[u8]) -> Result<Size, CropError> {
+    natural_size_with(source_bytes, DecodeOptions::default())
+}
+
+/// [`natural_size`] under `options`: width and height are swapped for an
+/// EXIF orientation that turns the image a quarter turn, unless
+/// `options.apply_orientation` is `false`.
+///
+/// # Errors
+///
+/// The same as [`natural_size`].
+pub fn natural_size_with(source_bytes: &[u8], options: DecodeOptions) -> Result<Size, CropError> {
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(source_bytes))
+        .with_guessed_format()
+        .map_err(|e| CropError::Decode(Box::new(e)))?
+        .into_decoder()
+        .map_err(|e| CropError::Decode(Box::new(e)))?;
+    let (width, height) = decoder.dimensions();
+    let (width, height) = if swaps_axes(orientation(&mut decoder, options)) {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    Ok(Size::new(width as f32, height as f32))
+}
+
+/// The orientation `options` asks to apply. An unreadable EXIF block
+/// counts as no orientation, as it does in browsers.
+fn orientation(decoder: &mut impl ImageDecoder, options: DecodeOptions) -> Orientation {
+    if options.apply_orientation {
+        decoder.orientation().unwrap_or(Orientation::NoTransforms)
+    } else {
+        Orientation::NoTransforms
+    }
+}
+
+/// Whether `orientation` turns the image a quarter turn, swapping its
+/// width and height.
+fn swaps_axes(orientation: Orientation) -> bool {
+    matches!(
+        orientation,
+        Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH
+    )
+}
+
 impl DecodedSource {
-    /// Decodes `source_bytes` once. Cache the result across repeated crops
-    /// of the same picked file.
+    /// Decodes `source_bytes` once with the default [`DecodeOptions`],
+    /// applying EXIF orientation. Cache the result across repeated crops of
+    /// the same picked file.
     ///
     /// # Errors
     ///
@@ -248,6 +347,17 @@ impl DecodedSource {
     /// decoder bombs whose claimed dimensions are hostile even when their
     /// predicted allocation stays under the byte cap.
     pub fn decode(source_bytes: &[u8]) -> Result<Self, CropError> {
+        Self::decode_with(source_bytes, DecodeOptions::default())
+    }
+
+    /// [`Self::decode`] under `options`.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::decode`].
+    pub fn decode_with(source_bytes: &[u8], options: DecodeOptions) -> Result<Self, CropError> {
+        let decode_error = |e: image::ImageError| CropError::Decode(Box::new(e));
+
         // Keep the default allocation limit; the dimension caps are strict
         // and checked against the header before any decoding happens.
         let mut limits = image::Limits::default();
@@ -257,14 +367,18 @@ impl DecodedSource {
         let mut reader = image::ImageReader::new(std::io::Cursor::new(source_bytes))
             .with_guessed_format()
             .map_err(|e| CropError::Decode(Box::new(e)))?;
-        reader.limits(limits);
+        reader.limits(limits.clone());
+        let mut decoder = reader.into_decoder().map_err(decode_error)?;
+        limits
+            .reserve(decoder.total_bytes())
+            .map_err(decode_error)?;
+        let orientation = orientation(&mut decoder, options);
 
+        let mut image = DynamicImage::from_decoder(decoder).map_err(decode_error)?;
+        image.apply_orientation(orientation);
         // `into_rgba8` reuses the decoded buffer when the source is already
         // RGBA8, where `to_rgba8` would copy it unconditionally.
-        reader
-            .decode()
-            .map(|img| Self(Arc::new(img.into_rgba8())))
-            .map_err(|e| CropError::Decode(Box::new(e)))
+        Ok(Self(Arc::new(image.into_rgba8())))
     }
 
     /// The decoded image's real pixel dimensions — exactly what a caller
@@ -676,6 +790,47 @@ pub fn crop_decoded(
         format,
         bytes,
     })
+}
+
+/// [`crop_decoded`] from undecoded `source_bytes`, without blocking the
+/// calling thread. On `wasm32` this is `crop_in_browser`: the browser decodes,
+/// resamples and encodes. Elsewhere [`DecodedSource::decode_with`] and
+/// [`crop_decoded`] run on a new background thread, and the returned
+/// future completes when it finishes; it needs no particular async
+/// runtime.
+///
+/// Both paths apply EXIF orientation unless `decode` turns it off, and
+/// produce the same output dimensions. Pixels are identical to
+/// [`crop_decoded`]'s on native targets and match them within resampling
+/// tolerance in the browser.
+///
+/// # Errors
+///
+/// The errors [`DecodedSource::decode`] and [`crop_decoded`] return, or,
+/// in the browser, those of `crop_in_browser`. On native targets,
+/// [`CropError::Background`] if the thread cannot be started or ends
+/// without a result.
+pub async fn crop_async(
+    source_bytes: impl Into<Arc<[u8]>>,
+    view: ViewTransform,
+    stencil: Stencil,
+    viewport: Size,
+    output: CropOutput,
+    decode: DecodeOptions,
+) -> Result<CroppedOutput, CropError> {
+    let source: Arc<[u8]> = source_bytes.into();
+    #[cfg(target_arch = "wasm32")]
+    {
+        browser::crop_in_browser(&source, view, stencil, viewport, output, decode).await
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        blocking::run(move || {
+            let decoded = DecodedSource::decode_with(&source, decode)?;
+            crop_decoded(&decoded, view, stencil, viewport, output)
+        })
+        .await?
+    }
 }
 
 /// Encodes the raw RGBA8 buffer `pixels` into `format`'s byte format and
