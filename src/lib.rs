@@ -6,8 +6,9 @@
 //! and renders it inside a fixed, clipped viewport, positioned by a
 //! caller-controlled [`geometry::ViewTransform`] (offset, zoom, rotation). A
 //! [`geometry::Stencil`] marks the crop window inside the viewport, dimmed
-//! everywhere else. [`crop::crop_to_png`] turns the same view and stencil
-//! into the actual cropped output.
+//! everywhere else. [`crop::crop_async`] turns the same view and stencil
+//! into the actual cropped output on web and desktop hosts alike, without
+//! blocking the UI thread.
 //!
 //! `Cropper` is a controlled renderer: it owns no positional state of its
 //! own. `offset`, `zoom` and `rotation` are read fresh from `view` on every
@@ -72,12 +73,14 @@ use std::sync::Arc;
 pub mod crop;
 pub mod geometry;
 pub use crop::{
+    crop_async, crop_decoded_to_png, crop_to_png, natural_size, natural_size_with, output_size,
+    CropError, CroppedImage, DecodeOptions, DecodedSource, MAX_OUTPUT_PIXELS,
+};
+#[cfg(target_arch = "wasm32")]
+pub use crop::{crop_blob_in_browser, crop_in_browser};
+pub use crop::{
     crop_decoded, output_size_with, CropOutput, CroppedFormat, CroppedOutput, JpegOptions,
     OutputFormat, SizeTarget,
-};
-pub use crop::{
-    crop_decoded_to_png, crop_to_png, output_size, CropError, CroppedImage, DecodedSource,
-    MAX_OUTPUT_PIXELS,
 };
 pub use geometry::{
     clamp_offset, contain_scale, min_zoom_to_cover, normalize_rotation, rotated_bounding_box,
@@ -174,8 +177,8 @@ enum DragState {
 /// transparent, `1.0` opaque black; out-of-range values are clamped). The
 /// viewport clips with `overflow: hidden`.
 ///
-/// `natural_size` must be `src`'s real decoded pixel dimensions (see
-/// [`crop::DecodedSource::decode`]). At `zoom = 1.0` the image is fit to the
+/// `natural_size` must be `src`'s pixel dimensions after EXIF orientation,
+/// as [`crop::natural_size`] reports them. At `zoom = 1.0` the image is fit to the
 /// viewport via `object-fit: contain` semantics ([`geometry::contain_scale`]);
 /// `zoom` then scales up from that fit, not from natural size. The `<img>`'s
 /// `width`/`height`/`max-width`/`max-height` are set inline so a host
@@ -202,9 +205,9 @@ enum DragState {
 ///
 /// `viewport` is the fixed footprint this component renders at, defaulting
 /// to `Size::new(480.0, 480.0)`. Whatever value is passed here MUST be
-/// passed again, unchanged, to
-/// [`crop::crop_to_png`]/[`crop::crop_decoded_to_png`]'s own required
-/// `viewport` parameter for any `view` rendered against it.
+/// passed again, unchanged, to the `viewport` parameter of
+/// [`crop::crop_async`] (or [`crop::crop_to_png`]/[`crop::crop_decoded`])
+/// for any `view` rendered against it.
 #[component]
 pub fn Cropper(
     #[props(into)] src: Arc<str>,

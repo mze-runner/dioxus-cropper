@@ -15,7 +15,7 @@ pub struct StageReadoutProps {
 }
 
 /// The per-stage timing line under the main readout — how long the file
-/// read, header probe, decode, crop and result-URL build each took. Pure
+/// read, header probe, crop and result-URL build each took. Pure
 /// props: the caller assembles the line (and omits this component entirely
 /// while no stage has run yet), this only renders it.
 #[derive(Props, Clone, PartialEq)]

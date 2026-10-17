@@ -1,5 +1,5 @@
 //! A "wait until it has painted" yield sequence, used before synchronous,
-//! CPU-bound work (`DecodedSource::decode`, `crop_decoded_to_png`) so a busy
+//! CPU-bound work (the header probe at file pick) so a busy
 //! state set just before the call has a chance to reach the screen.
 //!
 //! `setTimeout(0, ...)` alone returns control to the event loop but does not

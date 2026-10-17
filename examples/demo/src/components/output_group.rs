@@ -1,5 +1,5 @@
 //! "Output" control group — segmented selectors for the crop's size target
-//! and byte format. These feed `crop_decoded`'s `CropOutput` at crop time;
+//! and byte format. These feed `crop_async`'s `CropOutput` at crop time;
 //! neither affects the view transform.
 
 use dioxus::prelude::*;

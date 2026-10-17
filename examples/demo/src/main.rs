@@ -1,17 +1,21 @@
-//! Browser demo for `dioxus-cropper`: pick a local image, then pan, zoom,
-//! rotate and crop it. Every configurable prop of `Cropper` is exercised —
+//! Demo for `dioxus-cropper`, built for the web (default) or desktop
+//! (`--platform desktop`): pick a local image, then pan, zoom, rotate and
+//! crop it. Every configurable prop of `Cropper` is exercised —
 //! most from the rail on the right, `classes` wired to a visible cosmetic
 //! hook in `Stage`. Plain Dioxus, one hand-written stylesheet, no network
 //! requests — works offline.
 
+mod clock;
 mod components;
+#[cfg(not(target_arch = "wasm32"))]
+mod download;
 mod icons;
 mod object_url;
+#[cfg(target_arch = "wasm32")]
 mod paint;
 mod types;
 
-use std::io::Cursor;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use dioxus::prelude::*;
 use dioxus_cropper::geometry::{
@@ -19,8 +23,8 @@ use dioxus_cropper::geometry::{
     ViewTransform,
 };
 use dioxus_cropper::{
-    crop_decoded, output_size_with, CropError, CropOutput, CroppedFormat, DecodedSource,
-    PanDirection, MAX_OUTPUT_PIXELS,
+    crop_async, natural_size, output_size_with, CropError, CropOutput, CroppedFormat,
+    DecodeOptions, PanDirection, MAX_OUTPUT_PIXELS,
 };
 
 use components::{
@@ -45,7 +49,7 @@ const ZOOM_STEP: f32 = 0.1;
 const MIN_SAFE_ZOOM: f32 = 0.05;
 
 /// The highest zoom this demo allows — guards against sustained wheel input
-/// driving `zoom` arbitrarily high and asking the browser to rasterise an
+/// driving `zoom` arbitrarily high and asking the webview to rasterise an
 /// arbitrarily large scaled element. The demo's own choice; the crate places
 /// no ceiling on `zoom` itself.
 const MAX_ZOOM: f32 = 8.0;
@@ -63,39 +67,36 @@ const WHEEL_ZOOM_STEP: f32 = 0.001;
 #[derive(Clone)]
 struct LoadedImage {
     file_name: String,
-    /// Object URL over a `Blob` of the ORIGINAL file bytes — what the
-    /// browser renders in the stage. Revoked when the next pick replaces
-    /// it.
+    /// Image URL over the ORIGINAL file bytes — what the stage renders.
+    /// Revoked when the next pick replaces it.
     src_url: Arc<str>,
-    /// The picked file's raw, undecoded bytes, kept for the deferred
-    /// pixel decode on the first Crop press.
+    /// The picked file's raw, undecoded bytes, decoded on every Crop
+    /// press.
     bytes: Arc<[u8]>,
-    /// From the image header alone (`ImageReader::into_dimensions`) — no
-    /// pixel decode happens at pick time.
+    /// From the image header alone (`natural_size`), after EXIF
+    /// orientation — the size the stage renders it at. No pixel decode
+    /// happens at pick time.
     natural_size: Size,
-    /// Filled by the first Crop press that decodes successfully and reused
-    /// by every press after it, per the crate's own guidance
-    /// (`DecodedSource::decode`'s doc comment). Empty until then — picking
-    /// a file costs a header probe, not a full decode.
-    decoded: Arc<OnceLock<DecodedSource>>,
 }
 
 #[derive(Clone)]
 struct CroppedResult {
-    /// Object URL over the crop's encoded bytes. Revoked when the next
-    /// crop replaces it or the next pick clears it.
+    /// Image URL over the crop's encoded bytes. Revoked when the next crop
+    /// replaces it or the next pick clears it.
     url: Arc<str>,
+    /// The encoded bytes, for the desktop save action.
+    #[cfg(not(target_arch = "wasm32"))]
+    bytes: Arc<[u8]>,
     width: u32,
     height: u32,
-    /// The byte format the URL's blob holds — drives the result strip's
+    /// The byte format the URL serves — drives the result strip's
     /// MIME type, format label and download filename.
     format: CroppedFormat,
     size_bytes: usize,
 }
 
 /// The demo's single busy state, covering both spans of work it drives:
-/// reading and header-probing a picked file, and running the crop — which
-/// on the first press also performs the deferred pixel decode. One signal
+/// reading and header-probing a picked file, and running the crop. One signal
 /// for both — the file picker and the Crop button never run at the same
 /// time, so there is only ever one thing to be busy with.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -120,18 +121,8 @@ impl Busy {
 struct StageTimings {
     read_ms: Option<f64>,
     probe_ms: Option<f64>,
-    decode: Option<DecodeTiming>,
     crop_ms: Option<f64>,
     url_ms: Option<f64>,
-}
-
-/// The decode stage runs at most once per picked file — after that a press
-/// hits the cache, which is worth showing as such rather than as a
-/// suspicious 0 ms.
-#[derive(Clone, Copy)]
-enum DecodeTiming {
-    Ran(f64),
-    Cached,
 }
 
 /// Formats a stage duration: one decimal below 10 ms so a sub-millisecond
@@ -146,7 +137,7 @@ fn format_ms(ms: f64) -> String {
 }
 
 /// The one-line stage summary, e.g.
-/// `read 12 ms · probe 0.4 ms · decode 840 ms · crop 130 ms` — only stages
+/// `read 12 ms · probe 0.4 ms · crop 130 ms · url 0.2 ms` — only stages
 /// that have run appear. `None` until a file is picked.
 fn timing_line(timings: &StageTimings) -> Option<String> {
     let mut parts = Vec::new();
@@ -155,11 +146,6 @@ fn timing_line(timings: &StageTimings) -> Option<String> {
     }
     if let Some(ms) = timings.probe_ms {
         parts.push(format!("probe {} ms", format_ms(ms)));
-    }
-    match timings.decode {
-        Some(DecodeTiming::Ran(ms)) => parts.push(format!("decode {} ms", format_ms(ms))),
-        Some(DecodeTiming::Cached) => parts.push("decode cached".to_string()),
-        None => {}
     }
     if let Some(ms) = timings.crop_ms {
         parts.push(format!("crop {} ms", format_ms(ms)));
@@ -182,7 +168,7 @@ fn format_size(bytes: usize) -> String {
     }
 }
 
-/// The MIME type of the result blob for `format`. The demo only requests
+/// The MIME type of the result URL for `format`. The demo only requests
 /// PNG or JPEG; `Rgba` bytes carry no image container, hence the generic
 /// type.
 fn format_mime(format: CroppedFormat) -> &'static str {
@@ -202,8 +188,8 @@ fn format_label(format: CroppedFormat) -> &'static str {
     }
 }
 
-/// The download filename for `format` — extension matching the blob's
-/// byte format.
+/// The download filename for `format` — extension matching the byte
+/// format.
 fn download_name(format: CroppedFormat) -> &'static str {
     match format {
         CroppedFormat::Png => "cropped-image.png",
@@ -316,13 +302,13 @@ struct CropSinks {
     cropped: Signal<Option<CroppedResult>>,
     error: Signal<Option<String>>,
     timings: Signal<StageTimings>,
+    saved_to: Signal<Option<String>>,
 }
 
-/// Runs the deferred pixel decode (first press only — cached thereafter)
-/// and the crop, then publishes the result under a fresh object URL. Stage
-/// wall times land in `sinks.timings` on success, joining the pick-time
-/// entries already there.
-fn do_crop_now(
+/// Runs the crop — in the browser on the web, on a background thread on
+/// desktop — then publishes the result under a fresh image URL. Stage wall times land in
+/// `sinks.timings` on success, joining the pick-time entries already there.
+async fn do_crop_now(
     loaded: LoadedImage,
     view: ViewTransform,
     stencil: Stencil,
@@ -330,38 +316,21 @@ fn do_crop_now(
     output: CropOutput,
     mut sinks: CropSinks,
 ) {
-    // The one-and-only decode of the picked file, deferred from pick time
-    // to here. A failure is NOT cached — the `OnceLock` stays empty, so
-    // pressing Crop again retries the decode instead of replaying a stale
-    // error. This is also where a header-valid file with a corrupt body
-    // (which the pick-time probe cannot see) surfaces.
-    let decode;
-    let decoded = match loaded.decoded.get() {
-        Some(cached) => {
-            decode = DecodeTiming::Cached;
-            cached
-        }
-        None => {
-            let started = js_sys::Date::now();
-            match DecodedSource::decode(&loaded.bytes) {
-                Ok(fresh) => {
-                    decode = DecodeTiming::Ran(js_sys::Date::now() - started);
-                    loaded.decoded.get_or_init(|| fresh)
-                }
-                Err(e) => {
-                    sinks.error.set(Some(format!("crop failed: {e}")));
-                    return;
-                }
-            }
-        }
-    };
-
-    let started = js_sys::Date::now();
-    match crop_decoded(decoded, view, stencil, viewport, output) {
+    let started = clock::now_ms();
+    match crop_async(
+        loaded.bytes.clone(),
+        view,
+        stencil,
+        viewport,
+        output,
+        DecodeOptions::default(),
+    )
+    .await
+    {
         Ok(result) => {
-            let crop_ms = js_sys::Date::now() - started;
+            let crop_ms = clock::now_ms() - started;
 
-            let started = js_sys::Date::now();
+            let started = clock::now_ms();
             let url = match object_url::create(&result.bytes, format_mime(result.format)) {
                 Ok(url) => url,
                 Err(e) => {
@@ -371,11 +340,11 @@ fn do_crop_now(
                     return;
                 }
             };
-            let url_ms = js_sys::Date::now() - started;
+            let url_ms = clock::now_ms() - started;
 
             // Replacement-time release: the result strip re-renders off the
-            // old URL in the same pass that adopts the new one, and a blob
-            // URL's revocation only blocks NEW fetches — the old thumbnail
+            // old URL in the same pass that adopts the new one, and
+            // revoking a URL only blocks NEW fetches — the old thumbnail
             // stays painted for the instant it remains on screen.
             if let Some(previous) = sinks.cropped.peek().as_ref() {
                 object_url::revoke(&previous.url);
@@ -386,14 +355,16 @@ fn do_crop_now(
                 height: result.height,
                 format: result.format,
                 size_bytes: result.bytes.len(),
+                #[cfg(not(target_arch = "wasm32"))]
+                bytes: Arc::from(result.bytes),
             }));
+            sinks.saved_to.set(None);
             sinks.error.set(None);
 
             // Extends the pick-time read/probe entries rather than
             // replacing them — one line tells the whole story of the
             // current image.
             let mut t = *sinks.timings.peek();
-            t.decode = Some(decode);
             t.crop_ms = Some(crop_ms);
             t.url_ms = Some(url_ms);
             sinks.timings.set(t);
@@ -413,6 +384,9 @@ fn App() -> Element {
     let mut cropped = use_signal(|| Option::<CroppedResult>::None);
     let mut error = use_signal(|| Option::<String>::None);
     let mut timings = use_signal(StageTimings::default);
+    // Where the desktop save action last wrote the current result.
+    let saved_to = use_signal(|| Option::<String>::None);
+    object_url::use_handler();
 
     let mut shape = use_signal(ShapeKind::default);
     let mut viewport_preset = use_signal(ViewportPreset::default);
@@ -454,13 +428,14 @@ fn App() -> Element {
         let file_name = file.name();
         spawn(async move {
             busy.set(Busy::Loading);
+            #[cfg(target_arch = "wasm32")]
             paint::wait_for_paint().await;
 
             // A failed read, header probe or URL construction leaves
             // whatever image, view and result were already loaded
             // unchanged — e.g. an OS-offered HEIC/AVIF/BMP/TIFF this
             // demo's `image` build has no reader for.
-            let started = js_sys::Date::now();
+            let started = clock::now_ms();
             let bytes = match file.read_bytes().await {
                 Ok(bytes) => bytes,
                 Err(e) => {
@@ -469,20 +444,16 @@ fn App() -> Element {
                     return;
                 }
             };
-            let read_ms = js_sys::Date::now() - started;
+            let read_ms = clock::now_ms() - started;
 
-            // Header-only probe: `into_dimensions` reads just enough of
-            // the container to learn the pixel dimensions — the full
-            // decode is deferred to the first Crop press. A file whose
-            // header lies about its body still passes here; that surfaces
-            // at crop time as a decode error through the same readout.
-            let started = js_sys::Date::now();
-            let dimensions = image::ImageReader::new(Cursor::new(&bytes))
-                .with_guessed_format()
-                .map_err(|e| e.to_string())
-                .and_then(|reader| reader.into_dimensions().map_err(|e| e.to_string()));
-            let (width, height) = match dimensions {
-                Ok(dims) => dims,
+            // Header-only probe: `natural_size` reads just enough of the
+            // container to learn the pixel dimensions and EXIF orientation;
+            // pixels are decoded at crop time. A file whose header lies
+            // about its body still passes here; that surfaces at crop time
+            // as a decode error through the same readout.
+            let started = clock::now_ms();
+            let natural_size = match natural_size(&bytes) {
+                Ok(size) => size,
                 Err(e) => {
                     error.set(Some(format!(
                         "could not read the image header of \"{file_name}\": {e}"
@@ -491,8 +462,7 @@ fn App() -> Element {
                     return;
                 }
             };
-            let probe_ms = js_sys::Date::now() - started;
-            let natural_size = Size::new(width as f32, height as f32);
+            let probe_ms = clock::now_ms() - started;
 
             let src_url = match object_url::create(&bytes, &content_type) {
                 Ok(url) => url,
@@ -507,8 +477,8 @@ fn App() -> Element {
 
             // Replacement-time release of the previous pick's URLs: the
             // stage and result strip re-render off them in the same pass
-            // that adopts the new image, and a blob URL's revocation only
-            // blocks NEW fetches — the old image stays painted for the
+            // that adopts the new image, and revoking a URL only blocks
+            // NEW fetches — the old image stays painted for the
             // instant it remains on screen. This root component never
             // unmounts, so replacement is the one moment they can be
             // released.
@@ -524,7 +494,6 @@ fn App() -> Element {
                 src_url,
                 bytes: Arc::from(bytes.as_ref()),
                 natural_size,
-                decoded: Arc::new(OnceLock::new()),
             }));
             view.set(fresh_view(natural_size, vp_size(), stencil(), restrict()));
             cropped.set(None);
@@ -592,6 +561,18 @@ fn App() -> Element {
         });
     };
 
+    // Desktop only: the webview cannot download from a link.
+    let save_result = move |_: ()| {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(result) = cropped.read().as_ref() {
+            let mut saved_to = saved_to;
+            match download::save(&result.bytes, download_name(result.format)) {
+                Ok(path) => saved_to.set(Some(path.display().to_string())),
+                Err(e) => error.set(Some(format!("could not save the result: {e}"))),
+            }
+        }
+    };
+
     let do_crop = move |_| {
         // Re-entrancy guard — see `on_file_change`'s comment. Repeated clicks
         // that land before the `disabled` render must not queue up multiple
@@ -611,16 +592,13 @@ fn App() -> Element {
         };
         spawn(async move {
             busy.set(Busy::Cropping);
-            // Yields so a render lands with the button disabled and
-            // relabelled before the synchronous decode (first press only) +
-            // resample + encode work below runs and blocks the thread.
-            paint::wait_for_paint().await;
             let sinks = CropSinks {
                 cropped,
                 error,
                 timings,
+                saved_to,
             };
-            do_crop_now(loaded, vw, st, vp, output, sinks);
+            do_crop_now(loaded, vw, st, vp, output, sinks).await;
             busy.set(Busy::Idle);
         });
     };
@@ -645,7 +623,7 @@ fn App() -> Element {
     // press rather than surfacing as an error after it — the library itself
     // rejects a predicted output over `MAX_OUTPUT_PIXELS`. The prediction
     // applies the selected size target, so the dims and the limit check
-    // match what `crop_decoded` will produce: a target that shrinks the
+    // match what `crop_async` will produce: a target that shrinks the
     // output below the limit does not block on the native size.
     let output_check = loaded.as_ref().map(|loaded_image| {
         output_size_with(
@@ -743,6 +721,8 @@ fn App() -> Element {
                             size_label: format_size(result.size_bytes),
                             download_name: download_name(result.format).to_string(),
                             shape: current_stencil.shape(),
+                            saved_to: saved_to(),
+                            on_save: save_result,
                         }
                     }
                 }

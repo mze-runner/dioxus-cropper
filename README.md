@@ -16,7 +16,7 @@ A headless image cropper component for Dioxus.
 
 ```toml
 [dependencies]
-dioxus-cropper = "0.0.3"
+dioxus-cropper = "0.0.4"
 ```
 
 Select a Dioxus renderer feature (`web`, `desktop`, etc.) in the consuming crate.
@@ -59,13 +59,28 @@ fn app() -> Element {
 }
 ```
 
-`natural_size` must be the source image's real decoded pixel dimensions (`DecodedSource::natural_size`). `view`, `stencil` and `viewport` describe the current state; the component does not persist or mutate any of them.
+`natural_size` must be the source image's pixel dimensions after EXIF orientation, as the webview renders it — `natural_size(source_bytes)` reads them from the header without decoding pixels. `view`, `stencil` and `viewport` describe the current state; the component does not persist or mutate any of them.
 
 For a user-picked file on the web target, pass an object URL (`URL.createObjectURL` over a `Blob` of the file bytes) as `src` rather than a `data:` URI — an object URL is a constant-size handle, where a `data:` URI embeds the whole base64-encoded image in the DOM attribute. Revoke a replaced object URL with `URL.revokeObjectURL`.
 
+On desktop, blob URLs cannot be created from Rust; serve the bytes from memory with `dioxus::desktop::use_asset_handler` and pass that path as `src`. The demo's `object_url` module does both.
+
 ## Producing a crop
 
-Cropping is a separate call, not something `Cropper` does internally. `crop_to_png` decodes the source bytes and samples the same region `Cropper` is displaying, returning PNG bytes plus the output's pixel dimensions:
+Cropping is a separate call, not something `Cropper` does internally. `crop_async` is the call for both web and desktop hosts; it never blocks the UI thread:
+
+```rust
+use dioxus_cropper::{crop_async, CropOutput, DecodeOptions};
+
+let cropped = crop_async(source_bytes, view, stencil, viewport, CropOutput::default(), DecodeOptions::default()).await?;
+// cropped.bytes, cropped.width, cropped.height, cropped.format
+```
+
+On wasm32 the browser decodes, resamples and encodes (`createImageBitmap`, a 2D canvas, `toBlob`); no decoded copy of the source is held in WASM memory. On native targets the decode and `crop_decoded` run on a background thread; the future needs no particular async runtime. EXIF orientation is applied on both unless `DecodeOptions::default().with_orientation(false)` turns it off, in which case render the stage with CSS `image-orientation: none` and pass `natural_size_with` for the same options.
+
+On wasm32, `crop_blob_in_browser` takes a `Blob` (for example a picked `File`) in place of bytes.
+
+The synchronous building blocks below remain available. `DecodedSource::decode` applies EXIF orientation; `DecodedSource::decode_with` takes `DecodeOptions`. `crop_to_png` decodes the source bytes and samples the same region `Cropper` is displaying, returning PNG bytes plus the output's pixel dimensions:
 
 ```rust
 use dioxus_cropper::crop_to_png;
@@ -107,8 +122,8 @@ let cropped = crop_decoded(&decoded, view, stencil, viewport, output)?;
 
 | Prop | Type | Purpose |
 |---|---|---|
-| `src` | `Arc<str>` (`#[props(into)]` — accepts `&str`, `String`, or `Arc<str>`) | Image source — any URL the browser can render, an object URL included. |
-| `natural_size` | `Size` | The decoded image's real pixel dimensions. |
+| `src` | `Arc<str>` (`#[props(into)]` — accepts `&str`, `String`, or `Arc<str>`) | Image source — any URL the webview can render: an object URL on the web, an asset-handler path on desktop. |
+| `natural_size` | `Size` | The source's pixel dimensions after EXIF orientation (`natural_size`). |
 | `view` | `ViewTransform` | Caller-owned offset, zoom, rotation. |
 | `stencil` | `Stencil` | The crop window — `Stencil::rectangle`, `Stencil::square`, or `Stencil::circle`. |
 | `viewport` | `Size` | Fixed on-screen footprint; defaults to `480.0 x 480.0`. |
@@ -119,11 +134,9 @@ let cropped = crop_decoded(&decoded, view, stencil, viewport, output)?;
 | `on_pan` | `EventHandler<Point>` | Raw pan delta, adjusted for `pan_direction`. |
 | `on_zoom` | `EventHandler<f32>` | Raw wheel delta, sign-flipped so positive means zoom in. |
 
-## Production hosts: decode and crop block the calling thread
+## Production hosts: the synchronous calls block the calling thread
 
-`DecodedSource::decode` and `crop_decoded_to_png` are synchronous CPU work — resampling and PNG encoding included — and both block whichever thread calls them for as long as they run. On the web target that thread is the browser's main thread, so a call in progress freezes the page: no repaint, no input handling, until it returns.
-
-A production web host should run both calls in a Web Worker and message the result back to the main thread, keeping the page responsive while a large image decodes or crops. `output_size` lets a host predict the crop's output pixel dimensions from `natural`, `viewport`, `stencil` and `zoom` alone, without decoding or sampling any pixels, so it can be checked up front. `MAX_OUTPUT_PIXELS` is the ceiling `output_size` and `crop_decoded_to_png` enforce on that predicted output.
+`DecodedSource::decode` and `crop_decoded_to_png` are synchronous CPU work — resampling and PNG encoding included — and both block whichever thread calls them for as long as they run. On the web target that thread is the browser's main thread; on desktop it is the thread running the app's event loop. Use `crop_async` instead, which keeps both responsive. `output_size` lets a host predict the crop's output pixel dimensions from `natural`, `viewport`, `stencil` and `zoom` alone, without decoding or sampling any pixels, so it can be checked up front. `MAX_OUTPUT_PIXELS` is the ceiling `output_size` and `crop_decoded_to_png` enforce on that predicted output.
 
 ## Licence
 
