@@ -21,7 +21,7 @@ pub struct ResultStripProps {
     /// The filename the download link saves as — extension matching
     /// `format`.
     pub download_name: String,
-    /// The stencil shape the crop was taken with. `crop_in_browser` returns a
+    /// The stencil shape the crop was taken with. `crop_async` returns a
     /// circle's unmasked square bounding box, for the caller to round with
     /// CSS at display time — this is that rounding.
     pub shape: StencilShape,

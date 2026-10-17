@@ -7,9 +7,9 @@
 //! ## Deriving the screen-to-source pixel mapping
 //!
 //! [`Cropper`](crate::Cropper)'s `<img>` element is sized inline to exactly
-//! `natural_size` (the decoded image's real pixel dimensions), then scaled
-//! by CSS `scale({scale})` in its `transform`, where `scale = fit_scale *
-//! zoom` and `fit_scale = `[`contain_scale`]`(natural_size, viewport)`
+//! `natural_size` (the source's pixel dimensions after EXIF orientation),
+//! then scaled by CSS `scale({scale})` in its `transform`, where
+//! `scale = fit_scale * zoom` and `fit_scale = `[`contain_scale`]`(natural_size, viewport)`
 //! — the factor that fits `natural_size` inside the fixed viewport while
 //! preserving aspect ratio, the same way CSS `object-fit: contain` would.
 //! One screen pixel is thus `1 / scale` source (natural) pixels, not
@@ -202,6 +202,8 @@ impl std::error::Error for CropError {
 /// `crop_to_png` call except the caller supplying the identical `Size` to
 /// both — construct it once and pass the same value to both call sites.
 ///
+/// EXIF orientation is applied, as by [`DecodedSource::decode`].
+///
 /// This decodes `source_bytes` fresh on every call — decode dominates the
 /// pipeline's cost. A caller offering a repeatable "Crop" action against the
 /// same picked file must decode once via [`DecodedSource::decode`] and call
@@ -381,10 +383,11 @@ impl DecodedSource {
         Ok(Self(Arc::new(image.into_rgba8())))
     }
 
-    /// The decoded image's real pixel dimensions — exactly what a caller
-    /// must pass as [`Cropper`](crate::Cropper)'s `natural_size` prop, so
-    /// the component's rendered fit and this module's crop maths agree on
-    /// the same image.
+    /// The decoded image's pixel dimensions, after the orientation its
+    /// [`DecodeOptions`] applied — what a caller passes as
+    /// [`Cropper`](crate::Cropper)'s `natural_size` prop, so the
+    /// component's rendered fit and this module's crop maths agree on the
+    /// same image. Equal to [`natural_size_with`] for the same options.
     pub fn natural_size(&self) -> Size {
         Size::new(self.0.width() as f32, self.0.height() as f32)
     }

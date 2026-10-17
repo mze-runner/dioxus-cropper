@@ -1,13 +1,12 @@
 //! The browser crop path: the same crop [`crop_decoded`](super::crop_decoded)
 //! produces, with the decode, resample and encode handed to the browser.
-//! `createImageBitmap` decodes the source (applying EXIF orientation, as
-//! the stage's `<img>` does), a downscaling crop resizes the bitmap to the
-//! output resolution with `createImageBitmap`, a 2D canvas of the final
+//! `createImageBitmap` decodes the source (applying EXIF orientation unless
+//! [`DecodeOptions`] turns it off), a downscaling crop resizes the bitmap to
+//! the output resolution with `createImageBitmap`, a 2D canvas of the final
 //! output size draws it through the module doc's transform, and `toBlob`
-//! encodes the result. No
-//! decoded copy of the source is allocated in WASM memory; only the
-//! encoded output (or, for [`OutputFormat::Rgba`], the output pixels) is
-//! copied back.
+//! encodes the result. No decoded copy of the source is allocated in WASM
+//! memory; only the encoded output (or, for [`OutputFormat::Rgba`], the
+//! output pixels) is copied back.
 
 use super::{
     apply_size_target, native_output_size, CropError, CropOutput, CroppedFormat, CroppedOutput,

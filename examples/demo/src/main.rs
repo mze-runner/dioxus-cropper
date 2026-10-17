@@ -1,5 +1,6 @@
-//! Browser demo for `dioxus-cropper`: pick a local image, then pan, zoom,
-//! rotate and crop it. Every configurable prop of `Cropper` is exercised —
+//! Demo for `dioxus-cropper`, built for the web (default) or desktop
+//! (`--platform desktop`): pick a local image, then pan, zoom, rotate and
+//! crop it. Every configurable prop of `Cropper` is exercised —
 //! most from the rail on the right, `classes` wired to a visible cosmetic
 //! hook in `Stage`. Plain Dioxus, one hand-written stylesheet, no network
 //! requests — works offline.
@@ -48,7 +49,7 @@ const ZOOM_STEP: f32 = 0.1;
 const MIN_SAFE_ZOOM: f32 = 0.05;
 
 /// The highest zoom this demo allows — guards against sustained wheel input
-/// driving `zoom` arbitrarily high and asking the browser to rasterise an
+/// driving `zoom` arbitrarily high and asking the webview to rasterise an
 /// arbitrarily large scaled element. The demo's own choice; the crate places
 /// no ceiling on `zoom` itself.
 const MAX_ZOOM: f32 = 8.0;
@@ -66,9 +67,8 @@ const WHEEL_ZOOM_STEP: f32 = 0.001;
 #[derive(Clone)]
 struct LoadedImage {
     file_name: String,
-    /// Object URL over a `Blob` of the ORIGINAL file bytes — what the
-    /// browser renders in the stage. Revoked when the next pick replaces
-    /// it.
+    /// Image URL over the ORIGINAL file bytes — what the stage renders.
+    /// Revoked when the next pick replaces it.
     src_url: Arc<str>,
     /// The picked file's raw, undecoded bytes, decoded on every Crop
     /// press.
@@ -89,7 +89,7 @@ struct CroppedResult {
     bytes: Arc<[u8]>,
     width: u32,
     height: u32,
-    /// The byte format the URL's blob holds — drives the result strip's
+    /// The byte format the URL serves — drives the result strip's
     /// MIME type, format label and download filename.
     format: CroppedFormat,
     size_bytes: usize,
@@ -168,7 +168,7 @@ fn format_size(bytes: usize) -> String {
     }
 }
 
-/// The MIME type of the result blob for `format`. The demo only requests
+/// The MIME type of the result URL for `format`. The demo only requests
 /// PNG or JPEG; `Rgba` bytes carry no image container, hence the generic
 /// type.
 fn format_mime(format: CroppedFormat) -> &'static str {
@@ -188,8 +188,8 @@ fn format_label(format: CroppedFormat) -> &'static str {
     }
 }
 
-/// The download filename for `format` — extension matching the blob's
-/// byte format.
+/// The download filename for `format` — extension matching the byte
+/// format.
 fn download_name(format: CroppedFormat) -> &'static str {
     match format {
         CroppedFormat::Png => "cropped-image.png",
@@ -343,8 +343,8 @@ async fn do_crop_now(
             let url_ms = clock::now_ms() - started;
 
             // Replacement-time release: the result strip re-renders off the
-            // old URL in the same pass that adopts the new one, and a blob
-            // URL's revocation only blocks NEW fetches — the old thumbnail
+            // old URL in the same pass that adopts the new one, and
+            // revoking a URL only blocks NEW fetches — the old thumbnail
             // stays painted for the instant it remains on screen.
             if let Some(previous) = sinks.cropped.peek().as_ref() {
                 object_url::revoke(&previous.url);
@@ -477,8 +477,8 @@ fn App() -> Element {
 
             // Replacement-time release of the previous pick's URLs: the
             // stage and result strip re-render off them in the same pass
-            // that adopts the new image, and a blob URL's revocation only
-            // blocks NEW fetches — the old image stays painted for the
+            // that adopts the new image, and revoking a URL only blocks
+            // NEW fetches — the old image stays painted for the
             // instant it remains on screen. This root component never
             // unmounts, so replacement is the one moment they can be
             // released.
@@ -623,7 +623,7 @@ fn App() -> Element {
     // press rather than surfacing as an error after it — the library itself
     // rejects a predicted output over `MAX_OUTPUT_PIXELS`. The prediction
     // applies the selected size target, so the dims and the limit check
-    // match what `crop_in_browser` will produce: a target that shrinks the
+    // match what `crop_async` will produce: a target that shrinks the
     // output below the limit does not block on the native size.
     let output_check = loaded.as_ref().map(|loaded_image| {
         output_size_with(

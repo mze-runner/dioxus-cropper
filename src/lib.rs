@@ -205,9 +205,9 @@ enum DragState {
 ///
 /// `viewport` is the fixed footprint this component renders at, defaulting
 /// to `Size::new(480.0, 480.0)`. Whatever value is passed here MUST be
-/// passed again, unchanged, to
-/// [`crop::crop_to_png`]/[`crop::crop_decoded_to_png`]'s own required
-/// `viewport` parameter for any `view` rendered against it.
+/// passed again, unchanged, to the `viewport` parameter of
+/// [`crop::crop_async`] (or [`crop::crop_to_png`]/[`crop::crop_decoded`])
+/// for any `view` rendered against it.
 #[component]
 pub fn Cropper(
     #[props(into)] src: Arc<str>,
